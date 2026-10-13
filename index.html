@@ -1939,14 +1939,32 @@ function buildItem(rec) {
 
 function stopPlayback() {
   if (state.audioEl) {
-    try { state.audioEl.pause(); } catch (err) { /* 無視 */ }
-    state.audioEl.src = '';
+    const audio = state.audioEl;
+    // src='' は error イベントを発火させるので、
+    // ハンドラを外してから止める（停止操作なのにエラー表示が出るのを防ぐ）
+    audio.onended = null;
+    audio.onerror = null;
+    if (typeof audio.removeEventListener === 'function') {
+      audio.removeEventListener('ended', stopPlayback);
+      audio.removeEventListener('error', onAudioError);
+    }
+    try { audio.pause(); } catch (err) { /* 無視 */ }
+    // src は空にしない（空にすると error が発火する）
     state.audioEl = null;
   }
   state.playingId = null;
   cancelAnimationFrame(state.progressRafId);
   state.progressRafId = null;
   renderList();
+}
+
+function onAudioError(event) {
+  // 自分の停止操作（src の付け替えなど）で起きた error は無視する。
+  // 現在の再生対象以外から飛んできたイベントも無視する。
+  if (!state.audioEl) return;
+  if (event && event.target && event.target !== state.audioEl) return;
+  showBanner('この録音を再生できませんでした。');
+  stopPlayback();
 }
 
 function togglePlay(rec) {
@@ -1965,7 +1983,9 @@ function togglePlay(rec) {
         const a = new Audio(dataUrl);
         state.audioEl = a;
         a.addEventListener('ended', stopPlayback);
+        a.addEventListener('error', onAudioError);
         a.play().catch((err) => {
+          if (!state.audioEl) return;   // 停止済みなら無視
           showBanner('再生できませんでした: ' + ((err && err.message) || '不明なエラー'));
           stopPlayback();
         });
@@ -1985,10 +2005,7 @@ function togglePlay(rec) {
   state.playingId = rec.id;
 
   audio.addEventListener('ended', stopPlayback);
-  audio.addEventListener('error', () => {
-    showBanner('この録音を再生できませんでした。');
-    stopPlayback();
-  });
+  audio.addEventListener('error', onAudioError);
   audio.play().catch((err) => {
     showBanner('再生できませんでした: ' + ((err && err.message) || '不明なエラー'));
     stopPlayback();
