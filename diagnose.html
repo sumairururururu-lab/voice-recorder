@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>診断 - JSが動くか</title>
+<style>
+body { font: 15px/1.7 -apple-system, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+       max-width: 680px; margin: 0 auto; padding: 24px 18px; color: #111; }
+h1 { font-size: 19px; }
+ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+li { padding: 8px 11px; border-radius: 9px; background: #f5f6f8; border: 1px solid #e3e6ea;
+     font-size: 13.5px; display: grid; grid-template-columns: 22px 1fr; gap: 8px; }
+li.ok { background: #eaf7f0; border-color: #bfe6d1; }
+li.bad { background: #fdecec; border-color: #f5c6c6; }
+code { font: 12px ui-monospace, Menlo, Consolas, monospace; word-break: break-all; }
+.m { font-weight: 700; text-align: center; }
+.ok .m { color: #0a7d43; } .bad .m { color: #c0272d; }
+p { font-size: 13px; color: #555; }
+</style>
+</head>
+<body>
+<h1>環境診断（このファイルは JavaScript だけで動きます）</h1>
+<p id="noscriptMsg"><b>この行がまだ表示されているなら、JavaScript が動いていません。</b>
+下に結果が出たら、この段落は消えます。</p>
+<ul id="out"></ul>
+<script>
+(function () {
+  var out = document.getElementById('out');
+  var msg = document.getElementById('noscriptMsg');
+  if (msg) msg.parentNode.removeChild(msg);
+
+  function line(kind, label, detail) {
+    var li = document.createElement('li');
+    li.className = kind;
+    var m = document.createElement('span');
+    m.className = 'm';
+    m.textContent = kind === 'ok' ? 'OK' : '×';
+    var b = document.createElement('span');
+    b.appendChild(document.createTextNode(label + ' '));
+    if (detail) {
+      var c = document.createElement('code');
+      c.textContent = detail;
+      b.appendChild(c);
+    }
+    li.appendChild(m);
+    li.appendChild(b);
+    out.appendChild(li);
+  }
+
+  line('ok', 'JavaScript が動いています');
+  line(typeof navigator.mediaDevices !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? 'ok' : 'bad',
+    'getUserMedia', navigator.mediaDevices ? 'あり' : 'なし');
+  line(window.isSecureContext ? 'ok' : 'bad', 'セキュアコンテキスト', window.location.protocol);
+  line('ok', 'このファイルの開き方', window.location.protocol + '//' + (window.location.host || window.location.pathname));
+  var inFrame = false;
+  try { inFrame = window.self !== window.top; } catch (e) { inFrame = true; }
+  line(inFrame ? 'bad' : 'ok', '表示場所', inFrame ? 'iframe の中' : 'トップレベル');
+  line(typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' ? 'ok' : 'bad',
+    'URL.createObjectURL', typeof URL !== 'undefined' ? typeof URL.createObjectURL : 'URL なし');
+  line(typeof indexedDB !== 'undefined' ? 'ok' : 'bad', 'IndexedDB（録音の保存先）', typeof indexedDB);
+
+  if (navigator.permissions && navigator.permissions.query) {
+    navigator.permissions.query({ name: 'microphone' }).then(function (st) {
+      line(st.state === 'granted' ? 'ok' : 'bad', 'マイク権限', st.state);
+    }, function () {
+      line('ok', 'マイク権限', '未取得（未決定）');
+    });
+  } else {
+    line('ok', 'マイク権限', 'Permissions API 非対応');
+  }
+})();
+</script>
+</body>
+</html>
