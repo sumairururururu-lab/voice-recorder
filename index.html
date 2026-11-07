@@ -659,6 +659,13 @@ document.addEventListener('DOMContentLoaded', function () {
     <label style="display:flex;gap:6px;align-items:center;"><input id="ghAuto" type="checkbox"> 自動でバックアップ</label>
     <label style="display:flex;gap:6px;align-items:center;"><input id="ghEvict" type="checkbox"> 端末からは最新5本だけ残す</label>
   </div>
+  <div style="border-top:1px dashed #cfdbe8;padding-top:8px;display:grid;gap:8px;">
+    <label style="display:grid;gap:4px;">マイク
+      <select id="micPick" style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;font-size:14px;background:#fff;">
+        <option value="">（自動）</option>
+      </select></label>
+    <button id="micRefresh" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">マイク一覧を更新</button>
+  </div>
   <div style="border-top:1px dashed #cfdbe8;padding-top:8px;">
     <label style="display:flex;gap:8px;align-items:center;">
       <input id="forceWav16" type="checkbox"> 軽量WAV（16kHz）で録る（この端末は圧縮が動かないのでON推奨・1分あたり約1.9MB）</label>
@@ -1559,6 +1566,53 @@ function pickFormat() {
   return { mode: 'wav', candidate: { mime: 'audio/wav', ext: 'wav', label: 'WAV' } };
 }
 
+function micSavedId() { try { return localStorage.getItem('micDev') || ''; } catch (e) { return ''; } }
+
+// そのストリームが本当に音を出しているか確かめる（完全な無音を弾く）
+async function probeStream(st) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let c = null;
+  try {
+    c = new AC();
+    if (c.state === 'suspended') await c.resume();
+    const src = c.createMediaStreamSource(st);
+    const an = c.createAnalyser();
+    an.fftSize = 2048;
+    src.connect(an);
+    await new Promise((r) => setTimeout(r, 600));
+    const buf = new Float32Array(an.fftSize);
+    an.getFloatTimeDomainData(buf);
+    let e = 0;
+    for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
+    const rms = Math.sqrt(e / buf.length);
+    try { src.disconnect(); } catch (err) {}
+    return rms;
+  } catch (err) { return -1; }
+  finally { if (c) { try { c.close(); } catch (err) {} } }
+}
+
+// 無音のマイクをつかまされても、設定を変えて自動で取り直す
+async function openWorkingMic() {
+  const dev = micSavedId();
+  const cands = [];
+  if (dev) cands.push({ audio: { deviceId: { exact: dev } } });
+  cands.push({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  cands.push({ audio: true });
+  cands.push({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  let best = null, bestRms = -1, lastErr = null, tried = 0;
+  for (const c of cands) {
+    let st = null;
+    try { st = await navigator.mediaDevices.getUserMedia(c); } catch (e) { lastErr = e; continue; }
+    tried++;
+    const rms = await probeStream(st);
+    if (rms > bestRms) { if (best) best.stream.getTracks().forEach((t) => t.stop()); best = { stream: st, rms: rms, cfg: tried }; bestRms = rms; }
+    else { st.getTracks().forEach((t) => t.stop()); }
+    if (rms > 1e-6) return { stream: st, rms: rms, tried: tried, silent: false };
+  }
+  if (best) return { stream: best.stream, rms: bestRms, tried: tried, silent: bestRms <= 1e-6 };
+  throw (lastErr || new Error('マイクを開けませんでした'));
+}
+
 async function startRecording() {
   if (state.status !== 'idle') return;
 
@@ -1604,18 +1658,14 @@ async function startRecording() {
 
   let stream = null;
   try {
-    // 端末によっては channelCount/AGC/NS を指定すると無音のストリームが返るので、
-    // 新アプリで動作実績のある設定 → 素の audio:true の順で試す
-    const tries = [
-      { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
-      { audio: true }
-    ];
-    let lastErr = null;
-    for (const c of tries) {
-      try { stream = await navigator.mediaDevices.getUserMedia(c); lastErr = null; break; }
-      catch (e) { lastErr = e; stream = null; }
+    const got = await openWorkingMic();
+    stream = got.stream;
+    if (got.silent) {
+      showBanner('マイクが無音です（' + got.tried + '通りの設定を試しました）。'
+        + '他のタブやアプリがマイクを使っていないか確認するか、下の設定でマイクを選び直してください。', 'info');
+    } else if (got.tried > 1) {
+      setHint('マイクを自動で選び直しました（' + got.tried + '番目の設定で音が入りました）');
     }
-    if (!stream) throw (lastErr || new Error('マイクを開けませんでした'));
   } catch (err) {
     const blocked = (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError'));
     showBanner(micErrorMessage(err), null, { openInNewTab: blocked && isInIframe() });
@@ -2200,6 +2250,24 @@ async function ghBackup(manual) {
   $i('ghAuto').onchange = () => { GH.cfg.auto = $i('ghAuto').checked; ghSaveCfg(); };
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
+  const fillMics = async () => {
+    const sel = $i('micPick');
+    if (!sel) return;
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const ins = devs.filter((d) => d.kind === 'audioinput');
+      const cur = micSavedId();
+      sel.innerHTML = '<option value="">（自動）</option>' + ins.map((d, k) =>
+        '<option value="' + d.deviceId + '">' + (d.label || ('マイク ' + (k + 1))) + '</option>').join('');
+      sel.value = cur || '';
+    } catch (err) { /* 無視 */ }
+  };
+  fillMics();
+  if ($i('micRefresh')) $i('micRefresh').onclick = fillMics;
+  if ($i('micPick')) $i('micPick').onchange = () => {
+    try { localStorage.setItem('micDev', $i('micPick').value || ''); } catch (err) { /* 無視 */ }
+    setHint($i('micPick').value ? 'マイクを選びました（次の録音から）' : 'マイクを自動に戻しました');
+  };
   try { $i('forceWav16').checked = localStorage.getItem('forceWav16') === '1'; } catch (err) { /* 無視 */ }
   $i('forceWav16').onchange = () => {
     try { localStorage.setItem('forceWav16', $i('forceWav16').checked ? '1' : '0'); } catch (err) { /* 無視 */ }
