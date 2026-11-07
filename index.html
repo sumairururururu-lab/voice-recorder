@@ -776,6 +776,7 @@ document.addEventListener('DOMContentLoaded', function () {
       <h2>録音一覧 <span id="countBadge" class="count">0</span></h2>
       <div class="list-tools">
         <input id="searchInput" class="search" type="search" placeholder="名前で絞り込み" aria-label="録音を名前で絞り込み">
+        <button id="cleanGoneBtn" class="ghost-btn" type="button">⚠ 消えた録音を掃除</button>
         <button id="shareAllBtn" class="ghost-btn" type="button">↑ 全部共有</button>
         <button id="clearAllBtn" class="ghost-btn" type="button">すべて削除</button>
       </div>
@@ -2314,7 +2315,7 @@ async function probeDuration(blob) {
 async function fillDurations() {
   const btn = document.getElementById('ghLen');
   const all = (state.recordings || []);
-  const list = all.filter((r) => !r.duration || r.duration <= 0 || !isFinite(r.duration));
+  const list = all.filter((r) => !r.gone && (!r.duration || r.duration <= 0 || !isFinite(r.duration)));
   if (!list.length) { showBanner('長さが分からない録音はありません（ぜんぶ表示済み）', 'info'); return; }
   if (fillDurations.running) { showBanner('いま調べています… 終わるまで待ってね', 'info'); return; }
   fillDurations.running = true;
@@ -2333,7 +2334,14 @@ async function fillDurations() {
         if (d > 0) { rec.duration = d; await DB.update(rec.id, { duration: d }); done++; }
         else failed++;
         renderList();
-      } catch (err) { failed++; }
+      } catch (err) {
+        failed++;
+        const msg = (err && err.message) || '';
+        if (msg.indexOf('残っていません') >= 0) {
+          rec.gone = true;
+          try { await DB.update(rec.id, { gone: true }); } catch (e2) {}
+        }
+      }
     }
     showBanner('おわりました：' + done + '本の長さが分かりました' + (failed ? '（' + failed + '本は読めませんでした）' : ''), 'info');
     setHint(done + '本の長さが分かりました');
@@ -2481,6 +2489,20 @@ async function ghBackup(manual) {
     $i('ghLen').textContent = '⏱ 準備中…';
     setTimeout(() => { fillDurations(); }, 50);
   });
+  const cgb = document.getElementById('cleanGoneBtn');
+  if (cgb) cgb.addEventListener('click', async () => {
+    const gone = (state.recordings || []).filter((r) => r.gone);
+    if (!gone.length) { showBanner('掃除する録音はありません', 'info'); return; }
+    if (!cgb.classList.contains('confirming')) {
+      cgb.classList.add('confirming'); cgb.textContent = '本当に削除？（' + gone.length + '本）';
+      setTimeout(() => { cgb.classList.remove('confirming'); cgb.textContent = '⚠ 消えた録音を掃除'; }, 3000);
+      return;
+    }
+    cgb.classList.remove('confirming'); cgb.textContent = '⚠ 消えた録音を掃除';
+    for (const r of gone) { try { await DB.remove(r.id); } catch (e) {} }
+    await refreshList();
+    showBanner(gone.length + '本を一覧から消しました', 'info');
+  });
   const sab = document.getElementById('shareAllBtn');
   if (sab) sab.onclick = () => shareAllRecordings();
   const fillMics = async () => {
@@ -2545,7 +2567,7 @@ function buildItem(rec) {
   node.classList.toggle('is-playing', state.playingId === rec.id);
 
   node.querySelector('.rec-name').textContent = rec.name;
-  node.querySelector('.rec-ext').textContent = (rec.gh && !rec.blob ? '☁ GitHub ・ ' : '') + (rec.label || rec.ext || 'AUDIO');
+  node.querySelector('.rec-ext').textContent = (rec.gone ? '⚠ GitHubに無し ・ ' : (rec.gh && !rec.blob ? '☁ GitHub ・ ' : '')) + (rec.label || rec.ext || 'AUDIO');
   node.querySelector('.rec-duration').textContent = (rec.duration && rec.duration > 0)
     ? C.formatDurationCompact(rec.duration)
     : '—';
