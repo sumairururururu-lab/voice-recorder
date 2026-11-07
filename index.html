@@ -2289,22 +2289,26 @@ async function probeDuration(blob) {
   try {
     return await new Promise((resolve) => {
       const a = new Audio();
-      a.preload = 'metadata';
+      a.preload = 'auto';
+      a.muted = true;
       let settled = false;
-      const done = (v) => { if (settled) return; settled = true; resolve(isFinite(v) && v > 0 ? v : 0); };
-      const to = setTimeout(() => done(0), 15000);
+      const done = (v) => { if (settled) return; settled = true; try { a.pause(); } catch (e) {} resolve(isFinite(v) && v > 0 ? v : 0); };
+      const to = setTimeout(() => done(0), 20000);
+      const check = () => { if (isFinite(a.duration) && a.duration > 0) { clearTimeout(to); done(a.duration); } };
       a.addEventListener('loadedmetadata', () => {
-        if (isFinite(a.duration) && a.duration > 0) { clearTimeout(to); done(a.duration); }
-        else {
-          // webm は長さが Infinity になることがある → 大きい位置へ飛ばすと確定する
-          try { a.currentTime = 1e101; } catch (e) { done(0); }
-          a.addEventListener('timeupdate', () => {
-            clearTimeout(to);
-            try { a.currentTime = 0; } catch (e) {}
-            done(a.duration);
-          }, { once: true });
-        }
+        check();
+        if (settled) return;
+        // 長さが不明（webmの途中終了など）→ 大きい位置へ飛ばすと確定することがある
+        try { a.currentTime = 1e101; } catch (e) {}
+        // それでもだめなら、少しだけ再生してから測る
+        setTimeout(() => {
+          if (settled) return;
+          a.play().then(() => { check(); setTimeout(check, 800); }).catch(() => {});
+        }, 1200);
       }, { once: true });
+      a.addEventListener('durationchange', check);
+      a.addEventListener('seeked', check);
+      a.addEventListener('timeupdate', check);
       a.addEventListener('error', () => { clearTimeout(to); done(0); }, { once: true });
       a.src = url;
       a.load();
@@ -2315,7 +2319,7 @@ async function probeDuration(blob) {
 async function fillDurations() {
   const btn = document.getElementById('ghLen');
   const all = (state.recordings || []);
-  const list = all.filter((r) => !r.gone && (!r.duration || r.duration <= 0 || !isFinite(r.duration)));
+  const list = all.filter((r) => !r.gone && !r.noDur && (!r.duration || r.duration <= 0 || !isFinite(r.duration)));
   if (!list.length) { showBanner('長さが分からない録音はありません（ぜんぶ表示済み）', 'info'); return; }
   if (fillDurations.running) { showBanner('いま調べています… 終わるまで待ってね', 'info'); return; }
   fillDurations.running = true;
@@ -2339,17 +2343,20 @@ async function fillDurations() {
         if (d > 0) { rec.duration = d; await DB.update(rec.id, { duration: d }); done++; }
         else {
           failed++; failedNames.push(rec.name);
-          rec.gone = true;
-          try { await DB.update(rec.id, { gone: true }); } catch (e4) {}
+          rec.noDur = true;   // 長さ不明として記録（存在はしている）
+          try { await DB.update(rec.id, { noDur: true }); } catch (e4) {}
         }
         renderList();
       } catch (err) {
         failed++;
         failedNames.push(rec.name);
         const msg = (err && err.message) || '';
-        if (msg.indexOf('残っていません') >= 0 || msg.indexOf('空') >= 0 || msg.indexOf('データ') >= 0) {
+        if (msg.indexOf('残っていません') >= 0) {
           rec.gone = true;
           try { await DB.update(rec.id, { gone: true }); } catch (e2) {}
+        } else {
+          rec.noDur = true;
+          try { await DB.update(rec.id, { noDur: true }); } catch (e5) {}
         }
       }
     }
@@ -2581,7 +2588,7 @@ function buildItem(rec) {
   node.querySelector('.rec-ext').textContent = (rec.gone ? '⚠ GitHubに無し ・ ' : (rec.gh && !rec.blob ? '☁ GitHub ・ ' : '')) + (rec.label || rec.ext || 'AUDIO');
   node.querySelector('.rec-duration').textContent = (rec.duration && rec.duration > 0)
     ? C.formatDurationCompact(rec.duration)
-    : '—';
+    : (rec.gone ? '⚠ 消えた' : (rec.noDur ? '長さ不明' : '—'));
   node.querySelector('.rec-date').textContent = C.formatDateTime(rec.createdAt);
   node.querySelector('.rec-size').textContent = C.formatBytes(rec.size);
 
