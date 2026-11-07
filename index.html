@@ -546,22 +546,56 @@ html[data-theme="dark"] .icon-moon { display: none; }
 .rec-meta .dot { opacity: .6; }
 
 .rec-progress {
-  height: 3px;
-  margin-top: 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-  overflow: hidden;
+  position: relative;
+  height: 34px;              /* さわれる高さ（指で押しやすいように広く） */
+  margin-top: 2px;
+  cursor: pointer;
+  touch-action: none;
+  display: flex;
+  align-items: center;
 }
+.rec-progress::before {      /* 見た目の細いバー */
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  height: 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.rec-progress::after {       /* 押したときに少し濃く */
+  content: "";
+  position: absolute;
+  left: 0; right: 0;
+  height: 34px;
+  border-radius: 12px;
+  background: transparent;
+  transition: background .15s;
+}
+.rec-progress:active::after { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .rec-progress-bar {
   display: block;
-  height: 100%;
+  position: relative;
+  z-index: 1;
+  height: 10px;
   width: 0%;
   border-radius: 999px;
   background: var(--accent);
   transition: width .12s linear;
+  pointer-events: none;
 }
 
 .rec-actions { display: flex; gap: 4px; }
+.rec-seek { display: flex; gap: 8px; margin: 2px 0 6px; }
+.seek-btn {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+}
+.seek-btn:active { transform: scale(.97); }
 
 .action-btn {
   display: grid;
@@ -821,6 +855,10 @@ document.addEventListener('DOMContentLoaded', function () {
         <span class="rec-size"></span>
       </div>
       <div class="rec-progress"><span class="rec-progress-bar"></span></div>
+      <div class="rec-seek">
+        <button class="seek-btn back" type="button" title="10秒もどる">↺10</button>
+        <button class="seek-btn fwd" type="button" title="10秒すすむ">10↻</button>
+      </div>
     </div>
     <div class="rec-actions">
       <button class="action-btn download" type="button" title="ダウンロード" aria-label="ダウンロード">
@@ -2742,6 +2780,15 @@ function buildItem(rec) {
     });
   }
   attachSeek(node);
+  const jb = node.querySelector('.seek-btn.back');
+  const jf = node.querySelector('.seek-btn.fwd');
+  const jump = (sec) => {
+    const audio = state.audioEl;
+    if (!audio || !isFinite(audio.duration)) return;
+    audio.currentTime = Math.min(audio.duration, Math.max(0, audio.currentTime + sec));
+  };
+  if (jb) jb.addEventListener('click', (ev) => { ev.stopPropagation(); jump(-10); });
+  if (jf) jf.addEventListener('click', (ev) => { ev.stopPropagation(); jump(10); });
   node.querySelector('.delete').addEventListener('click', (event) => requestDelete(event.currentTarget, rec));
 
   return node;
