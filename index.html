@@ -2266,6 +2266,9 @@ async function ghGet(repo, path) {
     }
     if (j && j.content) return b64ToBlob(j.content, 'audio/webm');
   } catch (e) { /* 下でエラー表示 */ }
+  if (res.status === 404) {
+    throw new Error('この録音はGitHubに残っていません（削除済み）。一覧から削除してください。');
+  }
   throw new Error('取得失敗 ' + res.status + '（' + repo + ' / ' + path + '）');
 }
 function ghFileName(rec) { return String(rec.name || 'take').replace(/[\/\\:*?"<>|]/g, '_') + '.' + (rec.ext || 'webm'); }
