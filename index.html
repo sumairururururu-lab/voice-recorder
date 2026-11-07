@@ -654,6 +654,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <button id="ghEdit" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">✎ 編集</button>
     <button id="ghSaveBtn" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#dceaf7;font-size:14px;font-weight:700;">保存</button>
     <button id="ghRun" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">今すぐバックアップ</button>
+    <button id="ghPull" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁ 取り込む（別端末の録音を一覧に）</button>
   </div>
   <div style="display:flex;gap:16px;flex-wrap:wrap;">
     <label style="display:flex;gap:6px;align-items:center;"><input id="ghAuto" type="checkbox"> 自動でバックアップ</label>
@@ -2197,12 +2198,19 @@ async function ghCreateRepo(name) {
   GH.repos.push(c.full_name); GH.cfg.current = c.full_name; ghSaveCfg();
   return c.full_name;
 }
-async function ghRepoFor(extraBytes) {
-  if (!GH.cfg.token) throw new Error('トークン未設定');
+async function ghLoadRepos() {
+  if (!GH.cfg.token) return [];
   if (!GH.repos.length) {
     const arr = await ghReq('/user/repos?per_page=100&affiliation=owner&sort=created');
     GH.repos = arr.filter((r) => r.name.indexOf(GH.cfg.prefix) === 0).map((r) => r.full_name);
+    ghSaveCfg();
   }
+  return GH.repos;
+}
+
+async function ghRepoFor(extraBytes) {
+  if (!GH.cfg.token) throw new Error('トークン未設定');
+  await ghLoadRepos();
   let repo = GH.cfg.current && GH.repos.indexOf(GH.cfg.current) >= 0 ? GH.cfg.current : (GH.repos[GH.repos.length - 1] || '');
   if (!repo) return ghCreateRepo(GH.cfg.prefix);
   try {
@@ -2233,6 +2241,59 @@ async function ghGet(repo, path) {
   return b64ToBlob(j.content, 'audio/webm');
 }
 function ghFileName(rec) { return String(rec.name || 'take').replace(/[\/\\:*?"<>|]/g, '_') + '.' + (rec.ext || 'webm'); }
+function parseDateFromName(name) {
+  const m = String(name || '').match(/(\d{4})-(\d{2})-(\d{2})[ T_](\d{2})[.:](\d{2})[.:](\d{2})/);
+  if (!m) return 0;
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  const t = d.getTime();
+  return isFinite(t) ? t : 0;
+}
+
+// GitHubにある録音を一覧に取り込む（別端末で録ったものもここに出る）
+async function ghPull(manual) {
+  if (!GH.cfg.token) { if (manual) ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
+  if (GH.busy) return;
+  GH.busy = true;
+  try {
+    const repos = await ghLoadRepos();
+    const local = await DB.list();
+    const known = new Set(local.filter((r) => r.gh).map((r) => r.gh.repo + '|' + r.gh.path));
+    const knownNames = new Set(local.map((r) => r.name));
+    let added = 0, scanned = 0;
+    for (const repo of repos) {
+      let arr = [];
+      try { arr = await ghReq('/repos/' + repo + '/contents/'); } catch (e) { continue; }
+      if (!Array.isArray(arr)) continue;
+      for (const f of arr) {
+        if (!f || f.type !== 'file') continue;
+        if (!/\.(webm|wav|m4a|ogg|mp3|opus)$/i.test(f.name)) continue;
+        scanned++;
+        if (known.has(repo + '|' + f.name)) continue;
+        const name = f.name.replace(/\.[^.]+$/, '');
+        if (knownNames.has(name)) continue;
+        const ext = (f.name.split('.').pop() || 'webm').toLowerCase();
+        const rec = {
+          id: DB.newId(), name: name, blob: null, remoteOnly: true,
+          mime: 'audio/' + (ext === 'opus' ? 'ogg' : ext),
+          ext: ext, label: ext.toUpperCase(),
+          duration: 0, size: f.size || 0,
+          createdAt: parseDateFromName(name) || Date.now(),
+          gh: { repo: repo, path: f.name, at: Date.now() }
+        };
+        try { await DB.add(rec); added++; knownNames.add(name); } catch (e) { /* 重複など */ }
+      }
+    }
+    if (added) await refreshList();
+    if (typeof updateStorageInfo === 'function') updateStorageInfo();
+    const msg = added ? ('GitHubから ' + added + '本を取り込みました（端末には置かず、開くときに取り寄せます）')
+                      : ('新しく取り込むものはありません（確認 ' + scanned + '本）');
+    ghStatus(msg, 'ok');
+    if (manual) setHint(msg);
+  } catch (err) {
+    ghStatus('取り込み失敗: ' + ((err && err.message) || '不明'), 'err');
+  } finally { GH.busy = false; }
+}
+
 async function ghBlobOf(rec) { return rec.blob ? rec.blob : (rec.gh ? ghGet(rec.gh.repo, rec.gh.path) : null); }
 
 async function ghBackup(manual) {
@@ -2306,6 +2367,7 @@ async function ghBackup(manual) {
   $i('ghAuto').onchange = () => { GH.cfg.auto = $i('ghAuto').checked; ghSaveCfg(); };
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
+  if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
   const sab = document.getElementById('shareAllBtn');
   if (sab) sab.onclick = () => shareAllRecordings();
   const fillMics = async () => {
@@ -2331,7 +2393,10 @@ async function ghBackup(manual) {
     try { localStorage.setItem('forceWav16', $i('forceWav16').checked ? '1' : '0'); } catch (err) { /* 無視 */ }
     setHint($i('forceWav16').checked ? '軽量WAV（16kHz）で録ります' : '圧縮（webm）で録ります');
   };
-  if (GH.cfg.token) ghStatus('保存先 ' + (GH.cfg.current || GH.cfg.prefix) + ' ・ 準備OK', 'ok');
+  if (GH.cfg.token) {
+    ghStatus('保存先 ' + (GH.cfg.current || GH.cfg.prefix) + ' ・ 準備OK', 'ok');
+    setTimeout(() => { ghPull(false); }, 1500);
+  }
 })();
 
 async function refreshList() {
