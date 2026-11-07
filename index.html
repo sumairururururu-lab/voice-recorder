@@ -2521,6 +2521,7 @@ function buildItem(rec) {
   node.querySelector('.download').addEventListener('click', () => downloadRecording(rec));
   if (node.querySelector('.share')) node.querySelector('.share').addEventListener('click', () => shareRecording(rec));
   if (node.querySelector('.saveas')) node.querySelector('.saveas').addEventListener('click', () => saveAsRecording(rec));
+  attachSeek(node);
   node.querySelector('.delete').addEventListener('click', (event) => requestDelete(event.currentTarget, rec));
 
   return node;
@@ -2630,6 +2631,37 @@ function togglePlay(rec) {
   startProgressLoop();
 }
 
+function attachSeek(div) {
+  const bar = div.querySelector('.rec-progress');
+  if (!bar) return;
+  bar.style.cursor = 'pointer';
+  bar.style.touchAction = 'none';
+  const move = (ev) => {
+    const audio = state.audioEl;
+    if (!audio || !isFinite(audio.duration) || audio.duration <= 0) return;
+    const r = bar.getBoundingClientRect();
+    if (!r.width) return;
+    const x = Math.min(Math.max(ev.clientX - r.left, 0), r.width);
+    audio.currentTime = (x / r.width) * audio.duration;
+  };
+  let dragging = false;
+  bar.addEventListener('pointerdown', (ev) => {
+    if (!state.audioEl) return;
+    dragging = true;
+    try { bar.setPointerCapture(ev.pointerId); } catch (err) { /* 無視 */ }
+    move(ev);
+  });
+  bar.addEventListener('pointermove', (ev) => { if (dragging) move(ev); });
+  bar.addEventListener('pointerup', () => { dragging = false; });
+  bar.addEventListener('pointercancel', () => { dragging = false; });
+}
+
+function fmtTime(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60), s2 = Math.floor(sec % 60);
+  return m + ':' + (s2 < 10 ? '0' : '') + s2;
+}
+
 function startProgressLoop() {
   cancelAnimationFrame(state.progressRafId);
   const tick = () => {
@@ -2639,6 +2671,9 @@ function startProgressLoop() {
     const item = els.list.querySelector('[data-id="' + id + '"] .rec-progress-bar');
     if (item && audio.duration && isFinite(audio.duration)) {
       item.style.width = Math.min(100, (audio.currentTime / audio.duration) * 100).toFixed(2) + '%';
+      const row = els.list.querySelector('[data-id="' + id + '"]');
+      const durEl = row && row.querySelector('.rec-duration');
+      if (durEl) durEl.textContent = fmtTime(audio.currentTime) + ' / ' + fmtTime(audio.duration) + '（バーをタップで移動）';
     }
     state.progressRafId = requestAnimationFrame(tick);
   };
