@@ -683,6 +683,8 @@ document.addEventListener('DOMContentLoaded', function () {
       <input id="ghPrefix" readonly style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:14px;"></label>
     <label style="display:grid;gap:4px;">追加で取り込む場所（リポジトリ/フォルダ）
       <input id="ghExtra" readonly placeholder="vocal-takes/takes" style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:13px;"></label>
+    <label style="display:grid;gap:4px;">端末に残す本数
+      <input id="ghKeep" type="number" min="1" max="300" step="1" readonly style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:14px;"></label>
     <label style="display:grid;gap:4px;">上限MB
       <input id="ghMaxMB" type="number" min="50" max="2000" step="50" readonly style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:14px;"></label>
   </div>
@@ -690,6 +692,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <button id="ghEdit" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">✎ 編集</button>
     <button id="ghSaveBtn" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#dceaf7;font-size:14px;font-weight:700;">保存</button>
     <button id="ghRun" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">今すぐバックアップ</button>
+    <button id="ghGetAll" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">⬇ 全部端末に取り寄せる</button>
     <button id="ghVerify" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">🔍 GitHubと照合</button>
     <button id="ghReup" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁↻ 端末のぶんを送り直す</button>
     <button id="ghLen" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">⏱ 長さを全部調べる</button>
@@ -2540,6 +2543,32 @@ async function pullToDevice(rec) {
   return blob;
 }
 
+async function pullAllToDevice() {
+  if (!GH.cfg.token) { ghStatus('先にトークンを入れてください', 'err'); return; }
+  if (GH.busy) return;
+  const targets = (state.recordings || []).filter((r) => !r.blob && r.gh && !r.gone);
+  if (!targets.length) { showBanner('取り寄せる録音はありません（ぜんぶ端末にあります）', 'info'); return; }
+  const mb = Math.round(targets.reduce((a, r) => a + (r.size || 0), 0) / 1048576);
+  if (!pullAllToDevice.confirm) {
+    pullAllToDevice.confirm = true;
+    showBanner(targets.length + '本（約' + mb + 'MB）を端末に取り寄せます。端末の容量を使います。もう一度押すと実行', 'info');
+    setTimeout(() => { pullAllToDevice.confirm = false; }, 6000);
+    return;
+  }
+  pullAllToDevice.confirm = false;
+  GH.busy = true;
+  let ok = 0, ng = 0;
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      showBanner('取り寄せ中… ' + (i + 1) + '/' + targets.length + '（成功 ' + ok + '）', 'info');
+      try { await pullToDevice(targets[i]); ok++; } catch (e) { ng++; }
+    }
+    showBanner('取り寄せ完了：' + ok + '本' + (ng ? '／失敗 ' + ng + '本' : '') + '（固定したので自動では消しません）', 'info');
+    await refreshList();
+    if (typeof updateStorageInfo === 'function') updateStorageInfo();
+  } finally { GH.busy = false; }
+}
+
 async function ghReuploadAll() {
   if (!GH.cfg.token) { ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
   if (GH.busy) return;
@@ -2615,10 +2644,11 @@ async function ghBackup(manual) {
   $i('ghPrefix').value = GH.cfg.prefix;
   $i('ghMaxMB').value = GH.cfg.maxMB;
   if ($i('ghExtra')) $i('ghExtra').value = (GH.cfg.extra !== undefined ? GH.cfg.extra : 'vocal-takes/takes');
+  if ($i('ghKeep')) $i('ghKeep').value = (GH.cfg.keepLocal || 5);
   $i('ghAuto').checked = !!GH.cfg.auto;
   $i('ghEvict').checked = !!GH.cfg.evict;
   const lockFields = (locked) => {
-    ['ghToken', 'ghPrefix', 'ghMaxMB', 'ghExtra'].forEach((k) => {
+    ['ghToken', 'ghPrefix', 'ghMaxMB', 'ghExtra', 'ghKeep'].forEach((k) => {
       const el = $i(k); el.readOnly = locked; el.style.background = locked ? '#f5f5f5' : '#fff';
     });
     $i('ghEdit').textContent = locked ? '✎ 編集' : '🔒 ロック';
@@ -2631,6 +2661,11 @@ async function ghBackup(manual) {
     const mb = parseInt($i('ghMaxMB').value, 10);
     GH.cfg.maxMB = isFinite(mb) ? Math.max(50, Math.min(2000, mb)) : 500;
     GH.cfg.extra = ($i('ghExtra') ? $i('ghExtra').value.trim() : '');
+    if ($i('ghKeep')) {
+      const k2 = parseInt($i('ghKeep').value, 10);
+      GH.cfg.keepLocal = isFinite(k2) ? Math.max(1, Math.min(300, k2)) : 5;
+      $i('ghKeep').value = GH.cfg.keepLocal;
+    }
     GH.cfg.auto = $i('ghAuto').checked;
     GH.cfg.evict = $i('ghEvict').checked;
     ghSaveCfg(); lockFields(true);
@@ -2643,6 +2678,7 @@ async function ghBackup(manual) {
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
   if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
+  if ($i('ghGetAll')) $i('ghGetAll').addEventListener('click', () => pullAllToDevice());
   if ($i('ghVerify')) $i('ghVerify').addEventListener('click', () => ghVerify(false));
   if ($i('ghReup')) $i('ghReup').addEventListener('click', () => ghReuploadAll());
   if ($i('ghLen')) $i('ghLen').addEventListener('click', () => {
