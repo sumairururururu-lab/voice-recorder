@@ -818,6 +818,9 @@ document.addEventListener('DOMContentLoaded', function () {
       <button class="action-btn download" type="button" title="ダウンロード" aria-label="ダウンロード">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 20h14"></path></svg>
       </button>
+      <button class="action-btn share" type="button" title="共有（保存先を選べます）" aria-label="共有">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"></path><path d="M8 8l4-4 4 4"></path><path d="M5 14v5h14v-5"></path></svg>
+      </button>
       <button class="action-btn delete" type="button" title="削除" aria-label="削除">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"></path><path d="M9 7V4h6v3"></path><path d="M6 7l1 13h10l1-13"></path></svg>
       </button>
@@ -2369,6 +2372,7 @@ function buildItem(rec) {
   node.querySelector('.play-btn').addEventListener('click', () => togglePlay(rec));
   node.querySelector('.rec-name').addEventListener('click', (event) => beginRename(event.currentTarget, rec));
   node.querySelector('.download').addEventListener('click', () => downloadRecording(rec));
+  if (node.querySelector('.share')) node.querySelector('.share').addEventListener('click', () => shareRecording(rec));
   node.querySelector('.delete').addEventListener('click', (event) => requestDelete(event.currentTarget, rec));
 
   return node;
@@ -2595,6 +2599,23 @@ async function clearAll() {
 }
 
 /* ---------- ダウンロード ---------- */
+
+async function shareRecording(rec) {
+  try {
+    const blob = await ghBlobOf(rec);
+    if (!blob) { showBanner('データがありません'); return; }
+    const name = C.buildFileName(rec.name, rec.ext);
+    const file = new File([blob], name, { type: blob.type || 'audio/wav' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: rec.name });
+    } else {
+      showBanner('この端末は共有に未対応です。ダウンロードを使ってください。');
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;   // キャンセルは無視
+    showBanner('共有できませんでした: ' + ((err && err.message) || '不明'));
+  }
+}
 
 function downloadRecording(rec) {
   const fileName = C.buildFileName(rec.name, rec.ext);
