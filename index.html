@@ -637,7 +637,7 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%23dc2626'/%3E%3Crect x='42' y='20' width='16' height='38' rx='8' fill='white'/%3E%3Cpath d='M28 50a22 22 0 0 0 44 0' stroke='white' stroke-width='8' fill='none' stroke-linecap='round'/%3E%3Crect x='46' y='72' width='8' height='12' fill='white'/%3E%3C/svg%3E">
 </head>
-<body><div id="koreha-kyuuhan" style="position:sticky;top:0;z-index:9999;background:#7a1f1f;color:#fff;padding:12px 14px;font:14px/1.5 system-ui,sans-serif;">⚠ このページは<b>旧版</b>です。録音・保存は新しいアプリでしてください → <a href="https://sumairururururu-lab.github.io/vocal-tuner/" style="color:#ffd;font-weight:700;">vocal-tuner を開く</a><br><span style="opacity:.85">ここで録った音はこのページの中だけに保存され、新しいアプリには出てきません。「録音データが取得できませんでした」はこの旧版のバグです。</span></div>
+<body><div id="koreha-kyuuhan" style="position:sticky;top:0;z-index:9999;background:#1f3a5f;color:#fff;padding:10px 14px;font:14px/1.5 system-ui,sans-serif;"><b>旧版</b>です（録音できます）。保存場所は新アプリと<b>別</b>なので一覧は共有されません。<a href="https://sumairururururu-lab.github.io/vocal-tuner/" style="color:#ffe;font-weight:700;">新アプリ vocal-tuner を開く</a>　／　録音が失敗したら下に理由が出ます。</div>
 <div class="shell">
 
   <header class="topbar">
@@ -1200,6 +1200,8 @@ const state = {
   recorder: null,
   recChunks: [],
   wavChunks: [],
+  rescueChunks: [],
+  rescueSamples: 0,
   wavSampleRate: 48000,
   picked: null,
   startedAt: 0,
@@ -1652,6 +1654,25 @@ async function startRecording() {
           MediaRecorder.isTypeSupported(format.candidate.mime)) {
         options.mimeType = format.candidate.mime;
       }
+      // 予備: 圧縮が失敗しても音を失わないよう、16kHz のPCMを並行で取っておく
+      state.rescueChunks = [];
+      state.rescueSamples = 0;
+      if (typeof ctx.createScriptProcessor === 'function') {
+        const rn = ctx.createScriptProcessor(4096, 1, 1);
+        rn.onaudioprocess = (ev) => {
+          if (state.status !== 'recording') return;
+          if (state.rescueSamples > 16000 * 60 * 20) return;   // 20分で打ち切り（メモリ保護）
+          const inp = ev.inputBuffer.getChannelData(0);
+          const n = Math.floor(inp.length / 3);
+          const out = new Float32Array(n);
+          for (let i = 0; i < n; i++) { const j = i * 3; out[i] = (inp[j] + inp[j + 1] + inp[j + 2]) / 3; }
+          state.rescueChunks.push([out]);
+          state.rescueSamples += n;
+        };
+        source.connect(rn);
+        rn.connect(zeroGain);
+        state.captureNode = rn;
+      }
       const recorder = new MediaRecorder(stream, options);
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) state.recChunks.push(event.data);
@@ -1728,6 +1749,7 @@ function stopRecording() {
 
   if (recorder) {
     if (recorder.state !== 'inactive') {
+      try { if (typeof recorder.requestData === 'function') recorder.requestData(); } catch (err) { /* 無視 */ }
       try { recorder.stop(); } catch (err) { finalizeCompressed(elapsedMs() / 1000); }
     } else {
       finalizeCompressed(elapsedMs() / 1000);
@@ -1740,8 +1762,8 @@ function stopRecording() {
 const concatWavChunks = C.concatWavChunks;
 
 function finalizeWav() {
-  const chunks = state.wavChunks;
-  state.wavChunks = [];
+  const chunks = state.wavChunks.concat(state.rescueChunks);
+  state.wavChunks = []; state.rescueChunks = []; state.rescueSamples = 0;
   const channels = concatWavChunks(chunks);
   const measured = elapsedMs() / 1000;
 
@@ -1771,19 +1793,48 @@ function finalizeWav() {
   saveRecording(blob, duration, { mime: 'audio/wav', ext: 'wav', label: 'WAV' });
 }
 
+function recDiag() {
+  try {
+    const sz = state.recChunks.reduce((a, b) => a + b.size, 0);
+    const sup = (window.MediaRecorder && MediaRecorder.isTypeSupported)
+      ? (MIME_CANDIDATES.filter((c) => MediaRecorder.isTypeSupported(c.mime)).map((c) => c.mime).slice(0, 2).join(' / ') || 'なし')
+      : '判定不可';
+    return `形式 ${(state.picked && state.picked.mime) || '?'} ・ 本体 ${state.recChunks.length}個 ${Math.round(sz / 1024)}KB ・ 予備 ${(state.rescueSamples / 16000).toFixed(1)}秒 ・ 対応 ${sup}`;
+  } catch (err) { return ''; }
+}
+
+function rescueWavBlob() {
+  try {
+    if (!state.rescueChunks.length) return null;
+    const ch = concatWavChunks(state.rescueChunks);
+    if (!ch.length || !ch[0].length) return null;
+    return new Blob([C.buildWavBuffer(ch, 16000)], { type: 'audio/wav' });
+  } catch (err) { return null; }
+}
+
 function finalizeCompressed(duration) {
   const chunks = state.recChunks;
   state.recChunks = [];
   const mime = (state.picked && state.picked.mime) || 'audio/webm';
-  const blob = new Blob(chunks, { type: mime });
-  if (!blob.size) {
+  let blob = new Blob(chunks, { type: mime });
+  if (!blob.size || blob.size < 800) {
+    // 本体が空 → 予備のWAVで救う（音を絶対に失わない）
+    const r = rescueWavBlob();
+    if (r) {
+      const sec = state.rescueSamples / 16000;
+      saveRecording(r, sec, { mime: 'audio/wav', ext: 'wav', label: 'WAV（予備）' });
+      showBanner('この端末では圧縮録音がうまく動かなかったので、予備のWAVで保存しました（' + sec.toFixed(1) + '秒）。次からは WAV（無圧縮）を選ぶと安定します。');
+      state.rescueChunks = []; state.rescueSamples = 0;
+      return;
+    }
     cleanupAudio();
-    showBanner('録音データが取得できませんでした。もう一度お試しください。');
+    showBanner('録音データが取得できませんでした。もう一度お試しください。／ ' + recDiag());
     state.status = 'idle';
     updateStatusUI();
     els.timerDisplay.textContent = C.formatDuration(0);
     return;
   }
+  state.rescueChunks = []; state.rescueSamples = 0;
   saveRecording(blob, duration, state.picked);
 }
 
