@@ -659,6 +659,10 @@ document.addEventListener('DOMContentLoaded', function () {
     <label style="display:flex;gap:6px;align-items:center;"><input id="ghAuto" type="checkbox"> 自動でバックアップ</label>
     <label style="display:flex;gap:6px;align-items:center;"><input id="ghEvict" type="checkbox"> 端末からは最新5本だけ残す</label>
   </div>
+  <div style="border-top:1px dashed #cfdbe8;padding-top:8px;">
+    <label style="display:flex;gap:8px;align-items:center;">
+      <input id="forceWav16" type="checkbox"> 軽量WAV（16kHz）で録る（この端末は圧縮が動かないのでON推奨・1分あたり約1.9MB）</label>
+  </div>
   <div id="ghStatus" style="font-size:13px;color:#2c3e50;">未設定</div>
 </div>
 </details>
@@ -1541,7 +1545,9 @@ function stopDrawLoop() {
 /* ---------- 録音開始 ---------- */
 
 function pickFormat() {
-  const wantWav = els.formatSelect.value === 'wav';
+  let forced = false;
+  try { forced = localStorage.getItem('forceWav16') === '1'; } catch (err) { forced = false; }
+  const wantWav = els.formatSelect.value === 'wav' || forced;
   const hasMR = typeof MediaRecorder !== 'undefined';
   if (!wantWav && hasMR) {
     const canCheck = typeof MediaRecorder.isTypeSupported === 'function';
@@ -1786,6 +1792,23 @@ function stopRecording() {
 
 const concatWavChunks = C.concatWavChunks;
 
+// 48kHz などのPCMを 16kHz に間引く（声の分析に十分・容量は約1/3）
+function decimateTo16k(channels, srcRate) {
+  const target = 16000;
+  if (!srcRate || srcRate <= target) return { channels: channels, rate: srcRate || target };
+  const step = srcRate / target;
+  const inCh = channels[0];
+  const n = Math.floor(inCh.length / step);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * step), b = Math.min(inCh.length, Math.floor((i + 1) * step));
+    let sum = 0, cnt = 0;
+    for (let j = a; j < b; j++) { sum += inCh[j]; cnt++; }
+    out[i] = cnt ? sum / cnt : 0;
+  }
+  return { channels: [out], rate: target };
+}
+
 function finalizeWav() {
   const chunks = state.wavChunks.concat(state.rescueChunks);
   state.wavChunks = []; state.rescueChunks = []; state.rescueSamples = 0;
@@ -1802,8 +1825,11 @@ function finalizeWav() {
   }
 
   let buffer;
+  let outRate = state.wavSampleRate;
   try {
-    buffer = C.buildWavBuffer(channels, state.wavSampleRate);
+    const dec = decimateTo16k(channels, state.wavSampleRate);
+    buffer = C.buildWavBuffer(dec.channels, dec.rate);
+    outRate = dec.rate;
   } catch (err) {
     cleanupAudio();
     showBanner('WAV の変換に失敗しました: ' + ((err && err.message) || '不明なエラー'));
@@ -1814,7 +1840,7 @@ function finalizeWav() {
 
   const blob = new Blob([buffer], { type: 'audio/wav' });
   const frames = channels[0].length;
-  const duration = state.wavSampleRate ? frames / state.wavSampleRate : measured;
+  const duration = outRate ? frames / outRate : measured;
   saveRecording(blob, duration, { mime: 'audio/wav', ext: 'wav', label: 'WAV' });
 }
 
@@ -1847,8 +1873,10 @@ function finalizeCompressed(duration) {
     const r = rescueWavBlob();
     if (r) {
       const sec = state.rescueSamples / 16000;
-      saveRecording(r, sec, { mime: 'audio/wav', ext: 'wav', label: 'WAV（予備）' });
-      showBanner('この端末では圧縮録音がうまく動かなかったので、予備のWAVで保存しました（' + sec.toFixed(1) + '秒）。次からは WAV（無圧縮）を選ぶと安定します。');
+      saveRecording(r, sec, { mime: 'audio/wav', ext: 'wav', label: 'WAV（16k）' });
+      try { localStorage.setItem('forceWav16', '1'); } catch (err) { /* 無視 */ }
+      showBanner('この端末の圧縮録音（webm）が動かないので、WAVで保存しました（' + sec.toFixed(1) + '秒）。'
+        + '次からは自動で軽量WAV（16kHz）で録ります。／ 診断: ' + recDiag());
       state.rescueChunks = []; state.rescueSamples = 0;
       return;
     }
@@ -2150,6 +2178,11 @@ async function ghBackup(manual) {
   $i('ghAuto').onchange = () => { GH.cfg.auto = $i('ghAuto').checked; ghSaveCfg(); };
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
+  try { $i('forceWav16').checked = localStorage.getItem('forceWav16') === '1'; } catch (err) { /* 無視 */ }
+  $i('forceWav16').onchange = () => {
+    try { localStorage.setItem('forceWav16', $i('forceWav16').checked ? '1' : '0'); } catch (err) { /* 無視 */ }
+    setHint($i('forceWav16').checked ? '軽量WAV（16kHz）で録ります' : '圧縮（webm）で録ります');
+  };
   if (GH.cfg.token) ghStatus('保存先 ' + (GH.cfg.current || GH.cfg.prefix) + ' ・ 準備OK', 'ok');
 })();
 
