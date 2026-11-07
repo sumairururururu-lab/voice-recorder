@@ -2657,7 +2657,8 @@ function buildItem(rec) {
   if (node.querySelector('.saveas')) node.querySelector('.saveas').addEventListener('click', () => saveAsRecording(rec));
   if (node.querySelector('.reup')) {
     const rb = node.querySelector('.reup');
-    if (!rec.blob && rec.gh) {
+    if (rec.gone) { rb.style.display = 'none'; }
+    else if (!rec.blob && rec.gh) {
       rb.title = '端末に取り寄せる（送り直せるようにする）';
       rb.addEventListener('click', async () => {
         setHint('GitHubから端末に取り寄せています… ' + rec.name);
@@ -2665,7 +2666,18 @@ function buildItem(rec) {
           await pullToDevice(rec);
           setHint('端末に戻しました（☁↻で送り直せます）: ' + rec.name);
           renderList();
-        } catch (e) { setHint(''); showBanner('取り寄せできませんでした: ' + ((e && e.message) || '不明')); }
+        } catch (e) {
+          setHint('');
+          const msg = (e && e.message) || '不明';
+          if (msg.indexOf('残っていません') >= 0) {
+            rec.gone = true;
+            try { await DB.update(rec.id, { gone: true }); } catch (e2) {}
+            renderList();
+            showBanner('この録音はもう存在しません（GitHubにも端末にも音声がありません）。一覧から削除してください。', 'info');
+          } else {
+            showBanner('取り寄せできませんでした: ' + msg);
+          }
+        }
       });
     } else if (!rec.blob) {
       rb.style.display = 'none';
