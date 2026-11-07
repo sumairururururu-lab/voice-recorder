@@ -2504,7 +2504,11 @@ async function ghVerify(silent) {
     for (const t of targets) {
       try {
         const arr = await ghReq('/repos/' + t.repo + '/contents/' + (t.dir ? t.dir : ''));
-        if (Array.isArray(arr)) arr.forEach((f) => { if (f && f.name) existing.add(t.repo + '|' + (t.dir ? t.dir + '/' + f.name : f.name)); });
+        if (Array.isArray(arr)) arr.forEach((f) => {
+          if (!f || !f.name) return;
+          if (!/\.(webm|wav|m4a|ogg|mp3|opus)$/i.test(f.name)) return;   // 音声だけ数える
+          existing.add(t.repo + '|' + (t.dir ? t.dir + '/' + f.name : f.name));
+        });
       } catch (e) { /* リポジトリが無ければ飛ばす */ }
     }
     const local = await DB.list();
@@ -2549,13 +2553,14 @@ async function ghReuploadAll() {
   }
   ghReuploadAll.confirm = false;
   GH.busy = true;
-  let ok = 0, ng = 0;
+  let ok = 0, ng = 0, ngMsg = [];
   try {
     for (let i = 0; i < targets.length; i++) {
       showBanner('送り直し中… ' + (i + 1) + '/' + targets.length + '（成功 ' + ok + '）', 'info');
-      try { await ghUploadOne(targets[i]); ok++; } catch (e) { ng++; }
+      try { await ghUploadOne(targets[i]); ok++; }
+      catch (e) { ng++; if (ngMsg.length < 3) ngMsg.push(targets[i].name + '：' + ((e && e.message) || '不明')); }
     }
-    showBanner('送り直し完了：成功 ' + ok + '本' + (ng ? '／失敗 ' + ng + '本' : ''), 'info');
+    showBanner('送り直し完了：成功 ' + ok + '本' + (ng ? '／失敗 ' + ng + '本 → ' + ngMsg.join(' / ') : ''), 'info');
     await refreshList();
     if (typeof updateStorageInfo === 'function') updateStorageInfo();
   } finally { GH.busy = false; }
