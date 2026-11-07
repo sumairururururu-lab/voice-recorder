@@ -2724,6 +2724,7 @@ function buildItem(rec) {
   const node = els.itemTemplate.content.firstElementChild.cloneNode(true);
   node.dataset.id = rec.id;
   node.classList.toggle('is-playing', state.playingId === rec.id);
+  if (rec.gone && !rec.blob) node.style.opacity = '0.55';
 
   node.querySelector('.rec-name').textContent = rec.name;
   node.querySelector('.rec-ext').textContent = (rec.gone ? '⚠ GitHubに無し ・ ' : (rec.gh && !rec.blob ? '☁ GitHub ・ ' : '')) + (rec.label || rec.ext || 'AUDIO');
@@ -2826,7 +2827,12 @@ function onAudioError(event) {
   stopPlayback();
 }
 
+function goneMsg() {
+  showBanner('この録音はもう存在しません（音声がありません）。一覧から削除してください。', 'info');
+}
+
 function togglePlay(rec) {
+  if (rec.gone && !rec.blob) { goneMsg(); return; }
   if (state.playingId === rec.id) {
     stopPlayback();
     return;
@@ -3060,6 +3066,7 @@ async function clearAll() {
 /* ---------- ダウンロード ---------- */
 
 async function saveAsRecording(rec) {
+  if (rec.gone && !rec.blob) { goneMsg(); return; }
   try {
     const blob = await ghBlobOf(rec);
     if (!blob) { showBanner('データがありません'); return; }
@@ -3086,6 +3093,7 @@ async function saveAsRecording(rec) {
 }
 
 async function shareRecording(rec) {
+  if (rec.gone && !rec.blob) { goneMsg(); return; }
   try {
     const blob = await ghBlobOf(rec);
     if (!blob) { showBanner('データがありません'); return; }
@@ -3139,6 +3147,7 @@ async function shareAllRecordings() {
 }
 
 function downloadRecording(rec) {
+  if (rec.gone && !rec.blob) { goneMsg(); return; }
   const fileName = C.buildFileName(rec.name, rec.ext);
   if (!rec.blob && rec.gh) {
     showBanner('GitHubから読み込んでいます…', 'info');
