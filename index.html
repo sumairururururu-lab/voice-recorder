@@ -2259,7 +2259,7 @@ async function ghPull(manual) {
     const local = await DB.list();
     const known = new Set(local.filter((r) => r.gh).map((r) => r.gh.repo + '|' + r.gh.path));
     const knownNames = new Set(local.map((r) => r.name));
-    let added = 0, scanned = 0;
+    let added = 0, scanned = 0, already = 0;
     for (const repo of repos) {
       let arr = [];
       try { arr = await ghReq('/repos/' + repo + '/contents/'); } catch (e) { continue; }
@@ -2268,9 +2268,8 @@ async function ghPull(manual) {
         if (!f || f.type !== 'file') continue;
         if (!/\.(webm|wav|m4a|ogg|mp3|opus)$/i.test(f.name)) continue;
         scanned++;
-        if (known.has(repo + '|' + f.name)) continue;
         const name = f.name.replace(/\.[^.]+$/, '');
-        if (knownNames.has(name)) continue;
+        if (known.has(repo + '|' + f.name) || knownNames.has(name)) { already++; continue; }
         const ext = (f.name.split('.').pop() || 'webm').toLowerCase();
         const rec = {
           id: DB.newId(), name: name, blob: null, remoteOnly: true,
@@ -2285,8 +2284,10 @@ async function ghPull(manual) {
     }
     if (added) await refreshList();
     if (typeof updateStorageInfo === 'function') updateStorageInfo();
-    const msg = added ? ('GitHubから ' + added + '本を取り込みました（端末には置かず、開くときに取り寄せます）')
-                      : ('新しく取り込むものはありません（確認 ' + scanned + '本）');
+    const msg = added
+      ? ('GitHubから ' + added + '本を取り込みました（端末には置かず、開くときに取り寄せます）')
+      : ('新しく取り込むものはありません。GitHubに' + scanned + '本、うち' + already + '本はもうこの一覧にあります。'
+         + '別の端末の録音は、その端末で同じトークンを設定して1回アップロードすると、ここに出ます。');
     ghStatus(msg, 'ok');
     if (manual) setHint(msg);
   } catch (err) {
