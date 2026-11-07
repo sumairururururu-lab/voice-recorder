@@ -1604,9 +1604,18 @@ async function startRecording() {
 
   let stream = null;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
-    });
+    // 端末によっては channelCount/AGC/NS を指定すると無音のストリームが返るので、
+    // 新アプリで動作実績のある設定 → 素の audio:true の順で試す
+    const tries = [
+      { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } },
+      { audio: true }
+    ];
+    let lastErr = null;
+    for (const c of tries) {
+      try { stream = await navigator.mediaDevices.getUserMedia(c); lastErr = null; break; }
+      catch (e) { lastErr = e; stream = null; }
+    }
+    if (!stream) throw (lastErr || new Error('マイクを開けませんでした'));
   } catch (err) {
     const blocked = (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError'));
     showBanner(micErrorMessage(err), null, { openInNewTab: blocked && isInIframe() });
@@ -1730,6 +1739,19 @@ async function startRecording() {
   updateStatusUI();
   updateTimer();
   state.timerId = setInterval(updateTimer, 100);
+  setTimeout(() => {
+    try {
+      if (state.status !== 'recording' || !state.analyser) return;
+      const buf = new Float32Array(state.analyser.fftSize);
+      state.analyser.getFloatTimeDomainData(buf);
+      let e = 0;
+      for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
+      const rms = Math.sqrt(e / buf.length);
+      if (rms < 1e-5) {
+        showBanner('マイクから音が入っていません（無音）。端末のマイク設定を確認するか、録音を止めて「マイク」を選び直してください。', 'info');
+      }
+    } catch (err) { /* 無視 */ }
+  }, 1200);
   fitCanvas();
   startDrawLoop();
 }
