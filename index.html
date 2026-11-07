@@ -656,6 +656,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <button id="ghEdit" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">✎ 編集</button>
     <button id="ghSaveBtn" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#dceaf7;font-size:14px;font-weight:700;">保存</button>
     <button id="ghRun" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">今すぐバックアップ</button>
+    <button id="ghReup" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁↻ 端末のぶんを送り直す</button>
     <button id="ghLen" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">⏱ 長さを全部調べる</button>
     <button id="ghPull" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁ 取り込む（別端末の録音を一覧に）</button>
   </div>
@@ -823,6 +824,9 @@ document.addEventListener('DOMContentLoaded', function () {
     <div class="rec-actions">
       <button class="action-btn download" type="button" title="ダウンロード" aria-label="ダウンロード">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 20h14"></path></svg>
+      </button>
+      <button class="action-btn reup" type="button" title="GitHubへ送り直す（上書き）" aria-label="GitHubへ送り直す">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 17H8a4 4 0 1 1 0-8h1"></path><path d="M15 3l3 3-3 3"></path><path d="M18 6H11"></path><path d="M4 19h13"></path></svg>
       </button>
       <button class="action-btn saveas" type="button" title="フォルダを選んで保存" aria-label="フォルダを選んで保存">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h6l2 2h8v12H4z"></path><path d="M12 11v5"></path><path d="M9.5 13.5L12 16l2.5-2.5"></path></svg>
@@ -2430,6 +2434,43 @@ async function ghPull(manual) {
 
 async function ghBlobOf(rec) { return rec.blob ? rec.blob : (rec.gh ? ghGet(rec.gh.repo, rec.gh.path) : null); }
 
+async function ghUploadOne(rec) {
+  if (!GH.cfg.token) throw new Error('トークン未設定');
+  if (!rec.blob) throw new Error('端末に音声がありません（GitHubから取り寄せた録音は「再アップ」できません）');
+  const repo = await ghRepoFor(rec.size || 0);
+  const path = ghFileName(rec);
+  await ghPut(repo, path, rec.blob);
+  const gh = { repo: repo, path: path, at: Date.now() };
+  try { await DB.update(rec.id, { gh: gh, gone: false, noDur: false }); } catch (e) {}
+  rec.gh = gh; rec.gone = false; rec.noDur = false;
+  return gh;
+}
+
+async function ghReuploadAll() {
+  if (!GH.cfg.token) { ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
+  if (GH.busy) return;
+  const targets = (state.recordings || []).filter((r) => r.blob);
+  if (!targets.length) { showBanner('端末に音声がある録音がありません', 'info'); return; }
+  if (!ghReuploadAll.confirm) {
+    ghReuploadAll.confirm = true;
+    showBanner('端末にある ' + targets.length + '本をGitHubへ送り直します。もう一度押すと実行します（同じ名前は上書き）', 'info');
+    setTimeout(() => { ghReuploadAll.confirm = false; }, 5000);
+    return;
+  }
+  ghReuploadAll.confirm = false;
+  GH.busy = true;
+  let ok = 0, ng = 0;
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      showBanner('送り直し中… ' + (i + 1) + '/' + targets.length + '（成功 ' + ok + '）', 'info');
+      try { await ghUploadOne(targets[i]); ok++; } catch (e) { ng++; }
+    }
+    showBanner('送り直し完了：成功 ' + ok + '本' + (ng ? '／失敗 ' + ng + '本' : ''), 'info');
+    await refreshList();
+    if (typeof updateStorageInfo === 'function') updateStorageInfo();
+  } finally { GH.busy = false; }
+}
+
 async function ghBackup(manual) {
   if (GH.busy) return;
   if (!GH.cfg.token) { if (manual) ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
@@ -2504,6 +2545,7 @@ async function ghBackup(manual) {
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
   if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
+  if ($i('ghReup')) $i('ghReup').addEventListener('click', () => ghReuploadAll());
   if ($i('ghLen')) $i('ghLen').addEventListener('click', () => {
     $i('ghLen').textContent = '⏱ 準備中…';
     setTimeout(() => {
@@ -2601,6 +2643,23 @@ function buildItem(rec) {
   node.querySelector('.download').addEventListener('click', () => downloadRecording(rec));
   if (node.querySelector('.share')) node.querySelector('.share').addEventListener('click', () => shareRecording(rec));
   if (node.querySelector('.saveas')) node.querySelector('.saveas').addEventListener('click', () => saveAsRecording(rec));
+  if (node.querySelector('.reup')) {
+    if (!rec.blob) { node.querySelector('.reup').style.display = 'none'; }
+    else node.querySelector('.reup').addEventListener('click', async (ev) => {
+      const b = ev.currentTarget;
+      const old = b.style.color;
+      b.style.color = '#1e7e34';
+      setHint('GitHubへ送り直しています… ' + rec.name);
+      try {
+        await ghUploadOne(rec);
+        setHint('送り直しました: ' + rec.name);
+        renderList();
+      } catch (e) {
+        setHint('');
+        showBanner('送り直せませんでした: ' + ((e && e.message) || '不明'));
+      } finally { b.style.color = old; }
+    });
+  }
   attachSeek(node);
   node.querySelector('.delete').addEventListener('click', (event) => requestDelete(event.currentTarget, rec));
 
