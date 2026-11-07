@@ -668,7 +668,7 @@ document.addEventListener('DOMContentLoaded', function () {
   </div>
   <div style="border-top:1px dashed #cfdbe8;padding-top:8px;">
     <label style="display:flex;gap:8px;align-items:center;">
-      <input id="forceWav16" type="checkbox"> 軽量WAV（16kHz）で録る（この端末は圧縮が動かないのでON推奨・1分あたり約1.9MB）</label>
+      <input id="forceWav16" type="checkbox"> 軽量WAV（24kHz）で録る（この端末は圧縮が動かないのでON推奨・1分あたり約2.9MB）</label>
   </div>
   <div id="ghStatus" style="font-size:13px;color:#2c3e50;">未設定</div>
 </div>
@@ -1524,7 +1524,26 @@ function startDrawLoop() {
         let sum = 0;
         for (let i = 0; i < buffer.length; i++) { const a = (buffer[i] - 128) / 128; sum += a * a; }
         const db = 20 * Math.log10(Math.max(1e-9, Math.sqrt(sum / buffer.length)));
-        lv.textContent = '入力 ' + db.toFixed(0) + 'dB';
+        let hiTxt = '';
+        try {
+          if (!state.freqBuf) state.freqBuf = new Float32Array(state.analyser.frequencyBinCount);
+          state.analyser.getFloatFrequencyData(state.freqBuf);
+          const binHz = (state.audioContext.sampleRate / 2) / state.freqBuf.length;
+          let hi = 0, tot = 0;
+          for (let i = 1; i < state.freqBuf.length; i++) {
+            const f = i * binHz;
+            if (f > 8000) break;
+            const p = Math.pow(10, state.freqBuf[i] / 10);
+            tot += p;
+            if (f >= 2000 && f <= 5000) hi += p;
+          }
+          const hiRel = tot > 0 ? 10 * Math.log10(Math.max(1e-12, hi / tot)) : -99;
+          if (hiRel > -99) {
+            hiTxt = ' ・ 高域 ' + hiRel.toFixed(0) + 'dB' + (hiRel < -35 ? '（こもり気味）' : '');
+            if (db > -45 && hiRel < -35) hiTxt += ' →芯が消えてる';
+          }
+        } catch (err) { /* 無視 */ }
+        lv.textContent = '入力 ' + db.toFixed(0) + 'dB' + hiTxt;
         lv.style.color = db > -34 ? '#1e7e34' : db > -45 ? '#b8860b' : '#b03a2e';
       }
       const mid = h / 2;
@@ -1586,43 +1605,63 @@ async function probeStream(st) {
     if (c.state === 'suspended') await c.resume();
     const src = c.createMediaStreamSource(st);
     const an = c.createAnalyser();
-    an.fftSize = 2048;
+    an.fftSize = 4096;
+    an.smoothingTimeConstant = 0;
     src.connect(an);
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 700));
     const buf = new Float32Array(an.fftSize);
     an.getFloatTimeDomainData(buf);
     let e = 0;
     for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
     const rms = Math.sqrt(e / buf.length);
+    // 2〜5kHz がどれだけ残っているか（芯・こもりの判定に使う）
+    const fd = new Float32Array(an.frequencyBinCount);
+    an.getFloatFrequencyData(fd);
+    const binHz = (c.sampleRate / 2) / an.frequencyBinCount;
+    let hi = 0, tot = 0;
+    for (let i = 1; i < fd.length; i++) {
+      const f = i * binHz;
+      if (f > 8000) break;
+      const p = Math.pow(10, fd[i] / 10);
+      tot += p;
+      if (f >= 2000 && f <= 5000) hi += p;
+    }
+    const hiRel = tot > 0 ? 10 * Math.log10(Math.max(1e-12, hi / tot)) : -99;
     try { src.disconnect(); } catch (err) {}
-    return rms;
-  } catch (err) { return -1; }
+    return { rms: rms, hiRel: hiRel };
+  } catch (err) { return { rms: -1, hiRel: -99 }; }
   finally { if (c) { try { c.close(); } catch (err) {} } }
 }
 
 // 無音のマイクをつかまされても、設定を変えて自動で取り直す
 async function openWorkingMic() {
   const dev = micSavedId();
-  const cands = [];
-  if (dev) cands.push({ audio: { deviceId: { exact: dev } } });
-  cands.push({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-  cands.push({ audio: true });
-  cands.push({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  let best = null, bestRms = -1, lastErr = null, tried = 0, bestNo = 0;
+  const base = dev ? { deviceId: { exact: dev } } : {};
+  const cands = [
+    { name: 'ノイズ抑制OFF', audio: Object.assign({ echoCancellation: false, noiseSuppression: false, autoGainControl: false }, base) },
+    { name: '素の設定', audio: true },
+    { name: '自動ゲインON', audio: Object.assign({ echoCancellation: false, noiseSuppression: false, autoGainControl: true }, base) },
+    { name: '全部ON', audio: Object.assign({ echoCancellation: true, noiseSuppression: true, autoGainControl: true }, base) }
+  ];
+  const results = [];
+  let lastErr = null;
   for (const c of cands) {
     let st = null;
     try { st = await navigator.mediaDevices.getUserMedia(c); } catch (e) { lastErr = e; continue; }
-    tried++;
-    const rms = await probeStream(st);
-    if (rms > bestRms) {
-      if (best) best.stream.getTracks().forEach((t) => t.stop());
-      best = { stream: st }; bestRms = rms; bestNo = tried;
-    } else {
-      st.getTracks().forEach((t) => t.stop());
-    }
+    const p = await probeStream(st);
+    results.push({ name: c.name, stream: st, rms: p.rms, hiRel: p.hiRel });
   }
-  if (best) return { stream: best.stream, rms: bestRms, tried: tried, no: bestNo, silent: bestRms <= 1e-7 };
-  throw (lastErr || new Error('マイクを開けませんでした'));
+  if (!results.length) throw (lastErr || new Error('マイクを開けませんでした'));
+  // 音量がそこそこ(-52dB以上)ある中で、いちばん高域が残っているものを選ぶ
+  const audible = results.filter((r) => r.rms > 2.5e-3);
+  let pick = null;
+  if (audible.length) {
+    pick = audible.slice().sort((a, b) => (b.hiRel - a.hiRel) || (b.rms - a.rms))[0];
+  } else {
+    pick = results.slice().sort((a, b) => b.rms - a.rms)[0];
+  }
+  results.forEach((r) => { if (r !== pick) r.stream.getTracks().forEach((t) => t.stop()); });
+  return { stream: pick.stream, rms: pick.rms, hiRel: pick.hiRel, name: pick.name, tried: results.length, list: results.map((r) => r.name), silent: pick.rms <= 1e-7 };
 }
 
 async function startRecording() {
@@ -1677,7 +1716,7 @@ async function startRecording() {
         + '他のタブやアプリがマイクを使っていないか確認するか、下の設定でマイクを選び直してください。', 'info');
     } else {
       const db = got.rms > 0 ? (20 * Math.log10(got.rms)).toFixed(0) : '-99';
-      setHint('マイク自動選択: ' + got.tried + '通り試して、いちばん大きい設定（' + got.no + '番目・' + db + 'dB）を採用');
+      setHint('マイク自動選択: ' + got.tried + '通り試して「' + got.name + '」を採用（入力 ' + db + 'dB・高域 ' + got.hiRel.toFixed(0) + 'dB）');
     }
   } catch (err) {
     const blocked = (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError'));
@@ -1879,7 +1918,7 @@ const concatWavChunks = C.concatWavChunks;
 
 // 48kHz などのPCMを 16kHz に間引く（声の分析に十分・容量は約1/3）
 function decimateTo16k(channels, srcRate) {
-  const target = 16000;
+  const target = 24000;   // 16k→24kに上げて高域（2〜8kHz）を残す
   if (!srcRate || srcRate <= target) return { channels: channels, rate: srcRate || target };
   const step = srcRate / target;
   const inCh = channels[0];
@@ -1958,7 +1997,7 @@ function finalizeCompressed(duration) {
     const r = rescueWavBlob();
     if (r) {
       const sec = state.rescueSamples / 16000;
-      saveRecording(r, sec, { mime: 'audio/wav', ext: 'wav', label: 'WAV（16k）' });
+      saveRecording(r, sec, { mime: 'audio/wav', ext: 'wav', label: 'WAV（24k）' });
       try { localStorage.setItem('forceWav16', '1'); } catch (err) { /* 無視 */ }
       showBanner('この端末の圧縮録音（webm）が動かないので、WAVで保存しました（' + sec.toFixed(1) + '秒）。'
         + '次からは自動で軽量WAV（16kHz）で録ります。／ 診断: ' + recDiag());
