@@ -772,6 +772,7 @@ document.addEventListener('DOMContentLoaded', function () {
       <h2>録音一覧 <span id="countBadge" class="count">0</span></h2>
       <div class="list-tools">
         <input id="searchInput" class="search" type="search" placeholder="名前で絞り込み" aria-label="録音を名前で絞り込み">
+        <button id="shareAllBtn" class="ghost-btn" type="button">↑ 全部共有</button>
         <button id="clearAllBtn" class="ghost-btn" type="button">すべて削除</button>
       </div>
     </div>
@@ -2305,6 +2306,8 @@ async function ghBackup(manual) {
   $i('ghAuto').onchange = () => { GH.cfg.auto = $i('ghAuto').checked; ghSaveCfg(); };
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
+  const sab = document.getElementById('shareAllBtn');
+  if (sab) sab.onclick = () => shareAllRecordings();
   const fillMics = async () => {
     const sel = $i('micPick');
     if (!sel) return;
@@ -2615,6 +2618,42 @@ async function shareRecording(rec) {
     if (err && err.name === 'AbortError') return;   // キャンセルは無視
     showBanner('共有できませんでした: ' + ((err && err.message) || '不明'));
   }
+}
+
+async function shareAllRecordings() {
+  const list = (state.recordings || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+  if (!list.length) { showBanner('共有する録音がありません', 'info'); return; }
+  const remote = list.filter((r) => !r.blob && r.gh).length;
+  setHint('共有の準備中…（' + list.length + '本' + (remote ? '・うち' + remote + '本はGitHubから取得' : '') + '）');
+  const files = [];
+  for (const r of list) {
+    try {
+      const b = await ghBlobOf(r);
+      if (!b) continue;
+      files.push(new File([b], C.buildFileName(r.name, r.ext), { type: b.type || 'audio/wav' }));
+    } catch (err) { /* 取れないものは飛ばす */ }
+  }
+  if (!files.length) { showBanner('共有できる音声がありませんでした', 'info'); return; }
+  setHint(files.length + '本を共有します…');
+  try {
+    if (navigator.canShare && navigator.canShare({ files: files })) {
+      await navigator.share({ files: files, title: '録音 ' + files.length + '本' });
+      setHint(files.length + '本を共有しました');
+      return;
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') { setHint('共有をキャンセルしました'); return; }
+  }
+  // 共有できない端末では1本ずつダウンロード
+  for (let i = 0; i < files.length; i++) {
+    const url = URL.createObjectURL(files[i]);
+    const a = document.createElement('a');
+    a.href = url; a.download = files[i].name; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    await new Promise((res) => setTimeout(res, 700));
+  }
+  setHint(files.length + '本をダウンロードしました');
 }
 
 function downloadRecording(rec) {
