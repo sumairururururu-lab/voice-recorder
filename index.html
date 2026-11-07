@@ -822,7 +822,10 @@ document.addEventListener('DOMContentLoaded', function () {
       <button class="action-btn download" type="button" title="ダウンロード" aria-label="ダウンロード">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"></path><path d="M7 11l5 5 5-5"></path><path d="M5 20h14"></path></svg>
       </button>
-      <button class="action-btn share" type="button" title="共有（保存先を選べます）" aria-label="共有">
+      <button class="action-btn saveas" type="button" title="フォルダを選んで保存" aria-label="フォルダを選んで保存">
+        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h6l2 2h8v12H4z"></path><path d="M12 11v5"></path><path d="M9.5 13.5L12 16l2.5-2.5"></path></svg>
+      </button>
+      <button class="action-btn share" type="button" title="共有" aria-label="共有">
         <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"></path><path d="M8 8l4-4 4 4"></path><path d="M5 14v5h14v-5"></path></svg>
       </button>
       <button class="action-btn delete" type="button" title="削除" aria-label="削除">
@@ -2457,6 +2460,7 @@ function buildItem(rec) {
   node.querySelector('.rec-name').addEventListener('click', (event) => beginRename(event.currentTarget, rec));
   node.querySelector('.download').addEventListener('click', () => downloadRecording(rec));
   if (node.querySelector('.share')) node.querySelector('.share').addEventListener('click', () => shareRecording(rec));
+  if (node.querySelector('.saveas')) node.querySelector('.saveas').addEventListener('click', () => saveAsRecording(rec));
   node.querySelector('.delete').addEventListener('click', (event) => requestDelete(event.currentTarget, rec));
 
   return node;
@@ -2683,6 +2687,32 @@ async function clearAll() {
 }
 
 /* ---------- ダウンロード ---------- */
+
+async function saveAsRecording(rec) {
+  try {
+    const blob = await ghBlobOf(rec);
+    if (!blob) { showBanner('データがありません'); return; }
+    const name = C.buildFileName(rec.name, rec.ext);
+    if (typeof window.showSaveFilePicker === 'function') {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: name });
+        const w = await handle.createWritable();
+        await w.write(blob);
+        await w.close();
+        setHint('保存しました: ' + name);
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;      // キャンセル
+        showBanner('フォルダ選択を開けませんでした（' + ((err && err.message) || '不明') + '）。ダウンロードで保存します。', 'info');
+      }
+    } else {
+      showBanner('このブラウザはフォルダ選択に未対応です。ダウンロードしてから「ファイル」アプリでSDカードへ移動してください。', 'info');
+    }
+    downloadRecording(rec);
+  } catch (err) {
+    showBanner('保存できませんでした: ' + ((err && err.message) || '不明'));
+  }
+}
 
 async function shareRecording(rec) {
   try {
