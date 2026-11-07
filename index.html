@@ -2242,8 +2242,13 @@ async function ghDel(repo, path) {
   } catch (e) { /* 無くても無視 */ }
 }
 async function ghGet(repo, path) {
-  const j = await ghReq('/repos/' + repo + '/contents/' + encodeURIComponent(path));
-  return b64ToBlob(j.content, 'audio/webm');
+  // 1MBを超えるファイルはJSONだと中身が空で返るので、raw（生データ）で取る
+  const url = 'https://api.github.com/repos/' + repo + '/contents/' + path.split('/').map(encodeURIComponent).join('/');
+  const res = await fetch(url, { headers: { Authorization: 'Bearer ' + GH.cfg.token, Accept: 'application/vnd.github.raw' } });
+  if (!res.ok) throw new Error('取得失敗 ' + res.status);
+  const b = await res.blob();
+  if (!b.size) throw new Error('中身が空でした（0バイト）');
+  return b;
 }
 function ghFileName(rec) { return String(rec.name || 'take').replace(/[\/\\:*?"<>|]/g, '_') + '.' + (rec.ext || 'webm'); }
 function parseDateFromName(name) {
