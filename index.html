@@ -2318,10 +2318,11 @@ async function probeDuration(blob) {
 
 async function fillDurations() {
   const btn = document.getElementById('ghLen');
+  const resetBtn = () => { if (btn) btn.textContent = '⏱ 長さを全部調べる'; };
   const all = (state.recordings || []);
   const list = all.filter((r) => !r.gone && !r.noDur && (!r.duration || r.duration <= 0 || !isFinite(r.duration)));
-  if (!list.length) { showBanner('長さが分からない録音はありません（ぜんぶ表示済み）', 'info'); return; }
-  if (fillDurations.running) { showBanner('いま調べています… 終わるまで待ってね', 'info'); return; }
+  if (!list.length) { resetBtn(); showBanner('長さが分からない録音はありません（ぜんぶ表示済み）', 'info'); return; }
+  if (fillDurations.running) { resetBtn(); showBanner('いま調べています… 終わるまで待ってね', 'info'); return; }
   fillDurations.running = true;
   showBanner('長さを調べています… 0/' + list.length + '本（音声を取り寄せるので数分かかります）', 'info');
   let done = 0, failed = 0, failedNames = [];
@@ -2367,7 +2368,7 @@ async function fillDurations() {
     showBanner('長さ調べでエラー: ' + ((err && err.message) || '不明'));
   } finally {
     fillDurations.running = false;
-    if (btn) btn.textContent = '⏱ 長さを全部調べる';
+    resetBtn();
     renderList();
   }
 }
@@ -2505,7 +2506,10 @@ async function ghBackup(manual) {
   if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
   if ($i('ghLen')) $i('ghLen').addEventListener('click', () => {
     $i('ghLen').textContent = '⏱ 準備中…';
-    setTimeout(() => { fillDurations(); }, 50);
+    setTimeout(() => {
+      try { fillDurations(); } catch (e) { $i('ghLen').textContent = '⏱ 長さを全部調べる'; showBanner('エラー: ' + ((e && e.message) || '不明')); }
+    }, 50);
+    setTimeout(() => { if ($i('ghLen').textContent === '⏱ 準備中…') $i('ghLen').textContent = '⏱ 長さを全部調べる'; }, 4000);
   });
   const cgb = document.getElementById('cleanGoneBtn');
   if (cgb) cgb.addEventListener('click', async () => {
