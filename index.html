@@ -2446,6 +2446,15 @@ async function ghUploadOne(rec) {
   return gh;
 }
 
+async function pullToDevice(rec) {
+  if (!rec.gh) throw new Error('GitHubに保存されていません');
+  const blob = await ghBlobOf(rec);
+  if (!blob) throw new Error('取り寄せできませんでした');
+  await DB.update(rec.id, { blob: blob, size: blob.size, pinned: true, gone: false });
+  rec.blob = blob; rec.size = blob.size; rec.pinned = true; rec.gone = false;
+  return blob;
+}
+
 async function ghReuploadAll() {
   if (!GH.cfg.token) { ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
   if (GH.busy) return;
@@ -2492,9 +2501,12 @@ async function ghBackup(manual) {
     let evicted = 0;
     if (GH.cfg.evict) {
       const all = (await DB.list()).filter((r) => r.blob).sort((a, b) => b.createdAt - a.createdAt);
-      for (let i = GH.cfg.keepLocal; i < all.length; i++) {
+      let kept = 0;
+      for (let i = 0; i < all.length; i++) {
         const r = all[i];
         if (!r.gh) continue;
+        if (r.pinned) continue;              // 端末に固定したものは消さない
+        if (kept < GH.cfg.keepLocal) { kept++; continue; }
         await DB.update(r.id, { blob: null, remoteOnly: true });
         revokeObjectUrl(r.id);
         evicted++;
@@ -2644,8 +2656,20 @@ function buildItem(rec) {
   if (node.querySelector('.share')) node.querySelector('.share').addEventListener('click', () => shareRecording(rec));
   if (node.querySelector('.saveas')) node.querySelector('.saveas').addEventListener('click', () => saveAsRecording(rec));
   if (node.querySelector('.reup')) {
-    if (!rec.blob) { node.querySelector('.reup').style.display = 'none'; }
-    else node.querySelector('.reup').addEventListener('click', async (ev) => {
+    const rb = node.querySelector('.reup');
+    if (!rec.blob && rec.gh) {
+      rb.title = '端末に取り寄せる（送り直せるようにする）';
+      rb.addEventListener('click', async () => {
+        setHint('GitHubから端末に取り寄せています… ' + rec.name);
+        try {
+          await pullToDevice(rec);
+          setHint('端末に戻しました（☁↻で送り直せます）: ' + rec.name);
+          renderList();
+        } catch (e) { setHint(''); showBanner('取り寄せできませんでした: ' + ((e && e.message) || '不明')); }
+      });
+    } else if (!rec.blob) {
+      rb.style.display = 'none';
+    } else rb.addEventListener('click', async (ev) => {
       const b = ev.currentTarget;
       const old = b.style.color;
       b.style.color = '#1e7e34';
