@@ -2081,11 +2081,17 @@ async function updateStorageInfo() {
     if (navigator.storage && navigator.storage.estimate) {
       const est = await navigator.storage.estimate();
       const q = est.quota || 0, u = est.usage || 0, free = Math.max(0, q - u);
-      const perMin = (state.picked && state.picked.ext === 'wav') ? 6 * 1024 * 1024 : 0.5 * 1024 * 1024;
-      const mins = Math.floor(free / perMin / 60);
-      txt = '保存できる残り: ' + C.formatBytes(free) + '（約 ' + mins + '分）／使用中: ' + C.formatBytes(u);
-      el.style.color = mins < 10 ? '#b03a2e' : '#2c3e50';
-      if (mins < 10) txt += '　⚠ 少ないです。ダウンロードしてから消してください';
+      // 1分あたりの重さ: WAV(24kHz 16bit mono)=約2.8MB / 圧縮(webm)=約0.5MB
+      const isWav = !!(state.picked && state.picked.ext === 'wav');
+      const perMin = isWav ? (24000 * 2 * 60) / 1048576 : 0.5;   // MB/分
+      const mins = free / 1048576 / perMin;                       // 残り分数
+      const hours = mins / 60;
+      const timeTxt = hours >= 1 ? ('約 ' + Math.floor(hours) + '時間' + (Math.floor(mins % 60) ? Math.floor(mins % 60) + '分' : ''))
+                                 : ('約 ' + Math.floor(mins) + '分');
+      txt = '保存できる残り: ' + C.formatBytes(free) + '（' + timeTxt + '・' + (isWav ? 'WAV' : '圧縮') + 'で録る場合）'
+          + '／使用中: ' + C.formatBytes(u);
+      el.style.color = hours < 1 ? '#b03a2e' : '#2c3e50';
+      if (hours < 1) txt += '　⚠ 少ないです。ダウンロードしてから消してください';
     } else {
       txt = 'この端末では残量を表示できません';
     }
