@@ -656,6 +656,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <button id="ghEdit" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">✎ 編集</button>
     <button id="ghSaveBtn" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#dceaf7;font-size:14px;font-weight:700;">保存</button>
     <button id="ghRun" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">今すぐバックアップ</button>
+    <button id="ghVerify" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">🔍 GitHubと照合</button>
     <button id="ghReup" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁↻ 端末のぶんを送り直す</button>
     <button id="ghLen" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">⏱ 長さを全部調べる</button>
     <button id="ghPull" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁ 取り込む（別端末の録音を一覧に）</button>
@@ -2446,6 +2447,48 @@ async function ghUploadOne(rec) {
   return gh;
 }
 
+// GitHubのファイル一覧と照合して、消えている録音に印をつける（通信は数回だけ）
+async function ghVerify(silent) {
+  if (!GH.cfg.token) { if (!silent) ghStatus('トークン未設定', 'err'); return; }
+  if (GH.busy) return;
+  GH.busy = true;
+  try {
+    const repos = await ghLoadRepos();
+    const targets = repos.map((r) => ({ repo: r, dir: '' }));
+    (GH.cfg.extra || '').split(',').map((x) => x.trim()).filter(Boolean).forEach((x) => {
+      const parts = x.split('/').filter(Boolean);
+      if (parts.length < 2) return;
+      const dir = parts.slice(1).join('/');
+      const repo = (parts[0].indexOf('/') >= 0 ? parts[0] : 'sumairururururu-lab/' + parts[0]);
+      if (!targets.some((t) => t.repo === repo && t.dir === dir)) targets.push({ repo: repo, dir: dir });
+    });
+    const existing = new Set();
+    for (const t of targets) {
+      try {
+        const arr = await ghReq('/repos/' + t.repo + '/contents/' + (t.dir ? t.dir : ''));
+        if (Array.isArray(arr)) arr.forEach((f) => { if (f && f.name) existing.add(t.repo + '|' + (t.dir ? t.dir + '/' + f.name : f.name)); });
+      } catch (e) { /* リポジトリが無ければ飛ばす */ }
+    }
+    const local = await DB.list();
+    let missing = 0;
+    for (const r of local) {
+      if (!r.gh || r.blob) continue;        // 端末に実体があるものは対象外
+      const key = r.gh.repo + '|' + r.gh.path;
+      const ok = existing.has(key);
+      if (!ok && !r.gone) { r.gone = true; missing++; try { await DB.update(r.id, { gone: true }); } catch (e) {} }
+      if (ok && r.gone) { r.gone = false; try { await DB.update(r.id, { gone: false }); } catch (e) {} }
+    }
+    if (missing) await refreshList();
+    const msg = missing
+      ? ('GitHubから消えている録音が ' + missing + '本あります（⚠ 消えた）。一覧から削除できます')
+      : ('GitHubと照合OK（' + existing.size + '本そろっています）');
+    ghStatus(msg, missing ? 'err' : 'ok');
+    if (!silent) setHint(msg);
+  } catch (err) {
+    if (!silent) ghStatus('照合できませんでした: ' + ((err && err.message) || '不明'), 'err');
+  } finally { GH.busy = false; }
+}
+
 async function pullToDevice(rec) {
   if (!rec.gh) throw new Error('GitHubに保存されていません');
   const blob = await ghBlobOf(rec);
@@ -2557,6 +2600,7 @@ async function ghBackup(manual) {
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
   if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
+  if ($i('ghVerify')) $i('ghVerify').addEventListener('click', () => ghVerify(false));
   if ($i('ghReup')) $i('ghReup').addEventListener('click', () => ghReuploadAll());
   if ($i('ghLen')) $i('ghLen').addEventListener('click', () => {
     $i('ghLen').textContent = '⏱ 準備中…';
@@ -2607,6 +2651,7 @@ async function ghBackup(manual) {
   if (GH.cfg.token) {
     ghStatus('保存先 ' + (GH.cfg.current || GH.cfg.prefix) + ' ・ 準備OK', 'ok');
     setTimeout(() => { ghPull(false); }, 1500);
+    setTimeout(() => { ghVerify(true); }, 4000);
   }
 })();
 
