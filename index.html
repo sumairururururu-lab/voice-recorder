@@ -732,6 +732,7 @@ document.addEventListener('DOMContentLoaded', function () {
       <canvas id="waveCanvas" aria-hidden="true"></canvas>
       <div class="meter-time">
         <span id="timerDisplay">0:00.0</span>
+        <span id="lvlDisp" style="margin-left:10px;font-size:15px;font-variant-numeric:tabular-nums;opacity:.85;"></span>
         <span id="formatBadge" class="badge">—</span>
       </div>
     </div>
@@ -1518,6 +1519,14 @@ function startDrawLoop() {
 
     if (state.status === 'recording' || state.status === 'paused') {
       state.analyser.getByteTimeDomainData(buffer);
+      const lv = document.getElementById('lvlDisp');
+      if (lv) {
+        let sum = 0;
+        for (let i = 0; i < buffer.length; i++) { const a = (buffer[i] - 128) / 128; sum += a * a; }
+        const db = 20 * Math.log10(Math.max(1e-9, Math.sqrt(sum / buffer.length)));
+        lv.textContent = '入力 ' + db.toFixed(0) + 'dB';
+        lv.style.color = db > -34 ? '#1e7e34' : db > -45 ? '#b8860b' : '#b03a2e';
+      }
       const mid = h / 2;
       const amp = state.status === 'paused' ? 0.25 : 1;
 
@@ -1599,17 +1608,20 @@ async function openWorkingMic() {
   cands.push({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
   cands.push({ audio: true });
   cands.push({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  let best = null, bestRms = -1, lastErr = null, tried = 0;
+  let best = null, bestRms = -1, lastErr = null, tried = 0, bestNo = 0;
   for (const c of cands) {
     let st = null;
     try { st = await navigator.mediaDevices.getUserMedia(c); } catch (e) { lastErr = e; continue; }
     tried++;
     const rms = await probeStream(st);
-    if (rms > bestRms) { if (best) best.stream.getTracks().forEach((t) => t.stop()); best = { stream: st, rms: rms, cfg: tried }; bestRms = rms; }
-    else { st.getTracks().forEach((t) => t.stop()); }
-    if (rms > 1e-6) return { stream: st, rms: rms, tried: tried, silent: false };
+    if (rms > bestRms) {
+      if (best) best.stream.getTracks().forEach((t) => t.stop());
+      best = { stream: st }; bestRms = rms; bestNo = tried;
+    } else {
+      st.getTracks().forEach((t) => t.stop());
+    }
   }
-  if (best) return { stream: best.stream, rms: bestRms, tried: tried, silent: bestRms <= 1e-6 };
+  if (best) return { stream: best.stream, rms: bestRms, tried: tried, no: bestNo, silent: bestRms <= 1e-7 };
   throw (lastErr || new Error('マイクを開けませんでした'));
 }
 
@@ -1663,8 +1675,9 @@ async function startRecording() {
     if (got.silent) {
       showBanner('マイクが無音です（' + got.tried + '通りの設定を試しました）。'
         + '他のタブやアプリがマイクを使っていないか確認するか、下の設定でマイクを選び直してください。', 'info');
-    } else if (got.tried > 1) {
-      setHint('マイクを自動で選び直しました（' + got.tried + '番目の設定で音が入りました）');
+    } else {
+      const db = got.rms > 0 ? (20 * Math.log10(got.rms)).toFixed(0) : '-99';
+      setHint('マイク自動選択: ' + got.tried + '通り試して、いちばん大きい設定（' + got.no + '番目・' + db + 'dB）を採用');
     }
   } catch (err) {
     const blocked = (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError'));
