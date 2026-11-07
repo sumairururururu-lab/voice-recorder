@@ -656,6 +656,7 @@ document.addEventListener('DOMContentLoaded', function () {
     <button id="ghEdit" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">✎ 編集</button>
     <button id="ghSaveBtn" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#dceaf7;font-size:14px;font-weight:700;">保存</button>
     <button id="ghRun" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">今すぐバックアップ</button>
+    <button id="ghLen" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">⏱ 長さを全部調べる</button>
     <button id="ghPull" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">☁ 取り込む（別端末の録音を一覧に）</button>
   </div>
   <div style="display:flex;gap:16px;flex-wrap:wrap;">
@@ -2282,6 +2283,36 @@ function parseDateFromName(name) {
 }
 
 // GitHubにある録音を一覧に取り込む（別端末で録ったものもここに出る）
+async function fillDurations() {
+  const list = (state.recordings || []).filter((r) => !r.duration || r.duration <= 0);
+  if (!list.length) { showBanner('長さが分からない録音はありません', 'info'); return; }
+  if (GH.busy) return;
+  GH.busy = true;
+  let done = 0;
+  try {
+    for (const rec of list) {
+      setHint('長さを調べています… ' + (done + 1) + '/' + list.length);
+      try {
+        const blob = await ghBlobOf(rec);
+        if (!blob) continue;
+        const url = URL.createObjectURL(blob);
+        const d = await new Promise((resolve) => {
+          const a = new Audio();
+          const to = setTimeout(() => resolve(0), 8000);
+          a.addEventListener('loadedmetadata', () => { clearTimeout(to); resolve(a.duration || 0); });
+          a.addEventListener('error', () => { clearTimeout(to); resolve(0); });
+          a.src = url;
+        });
+        URL.revokeObjectURL(url);
+        if (d > 0) { rec.duration = d; await DB.update(rec.id, { duration: d }); done++; }
+        renderList();
+      } catch (err) { /* 1本失敗しても続ける */ }
+    }
+    setHint(done + '本の長さが分かりました');
+  } finally { GH.busy = false; }
+  renderList();
+}
+
 async function ghPull(manual) {
   if (!GH.cfg.token) { if (manual) ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
   if (GH.busy) return;
@@ -2413,6 +2444,7 @@ async function ghBackup(manual) {
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
   if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
+  if ($i('ghLen')) $i('ghLen').onclick = () => fillDurations();
   const sab = document.getElementById('shareAllBtn');
   if (sab) sab.onclick = () => shareAllRecordings();
   const fillMics = async () => {
@@ -2478,7 +2510,9 @@ function buildItem(rec) {
 
   node.querySelector('.rec-name').textContent = rec.name;
   node.querySelector('.rec-ext').textContent = (rec.gh && !rec.blob ? '☁ GitHub ・ ' : '') + (rec.label || rec.ext || 'AUDIO');
-  node.querySelector('.rec-duration').textContent = C.formatDurationCompact(rec.duration);
+  node.querySelector('.rec-duration').textContent = (rec.duration && rec.duration > 0)
+    ? C.formatDurationCompact(rec.duration)
+    : '—';
   node.querySelector('.rec-date').textContent = C.formatDateTime(rec.createdAt);
   node.querySelector('.rec-size').textContent = C.formatBytes(rec.size);
 
@@ -2576,6 +2610,15 @@ function togglePlay(rec) {
   state.audioEl = audio;
   state.playingId = rec.id;
 
+  audio.addEventListener('loadedmetadata', () => {
+    try {
+      const d = audio.duration;
+      if (!rec.duration && isFinite(d) && d > 0) {
+        rec.duration = d;
+        DB.update(rec.id, { duration: d }).then(() => renderList()).catch(() => {});
+      }
+    } catch (err) { /* 無視 */ }
+  });
   audio.addEventListener('ended', stopPlayback);
   audio.addEventListener('error', onAudioError);
   audio.play().catch((err) => {
