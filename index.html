@@ -2320,7 +2320,7 @@ async function fillDurations() {
   if (fillDurations.running) { showBanner('いま調べています… 終わるまで待ってね', 'info'); return; }
   fillDurations.running = true;
   showBanner('長さを調べています… 0/' + list.length + '本（音声を取り寄せるので数分かかります）', 'info');
-  let done = 0, failed = 0;
+  let done = 0, failed = 0, failedNames = [];
   try {
     for (let i = 0; i < list.length; i++) {
       const rec = list[i];
@@ -2329,21 +2329,32 @@ async function fillDurations() {
       setHint(label);
       try {
         const blob = await ghBlobOf(rec);
-        if (!blob) { failed++; continue; }
+        if (!blob) {
+          failed++; failedNames.push(rec.name);
+          rec.gone = true;
+          try { await DB.update(rec.id, { gone: true }); } catch (e3) {}
+          continue;
+        }
         const d = await probeDuration(blob);
         if (d > 0) { rec.duration = d; await DB.update(rec.id, { duration: d }); done++; }
-        else failed++;
+        else {
+          failed++; failedNames.push(rec.name);
+          rec.gone = true;
+          try { await DB.update(rec.id, { gone: true }); } catch (e4) {}
+        }
         renderList();
       } catch (err) {
         failed++;
+        failedNames.push(rec.name);
         const msg = (err && err.message) || '';
-        if (msg.indexOf('残っていません') >= 0) {
+        if (msg.indexOf('残っていません') >= 0 || msg.indexOf('空') >= 0 || msg.indexOf('データ') >= 0) {
           rec.gone = true;
           try { await DB.update(rec.id, { gone: true }); } catch (e2) {}
         }
       }
     }
-    showBanner('おわりました：' + done + '本の長さが分かりました' + (failed ? '（' + failed + '本は読めませんでした）' : ''), 'info');
+    showBanner('おわりました：' + done + '本の長さが分かりました'
+      + (failed ? '／読めなかった ' + failed + '本：' + failedNames.slice(0, 3).join('、') : ''), 'info');
     setHint(done + '本の長さが分かりました');
   } catch (err) {
     showBanner('長さ調べでエラー: ' + ((err && err.message) || '不明'));
