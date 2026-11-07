@@ -639,6 +639,29 @@ document.addEventListener('DOMContentLoaded', function () {
 </head>
 <body><div id="koreha-kyuuhan" style="position:sticky;top:0;z-index:9999;background:#1f3a5f;color:#fff;padding:10px 14px;font:14px/1.5 system-ui,sans-serif;"><b>旧版</b>です（録音できます）。保存場所は新アプリと<b>別</b>なので一覧は共有されません。<a href="https://sumairururururu-lab.github.io/vocal-tuner/" style="color:#ffe;font-weight:700;">新アプリ vocal-tuner を開く</a>　／　録音が失敗したら下に理由が出ます。</div>
 <div id="storInfo" style="padding:8px 14px;font:13px/1.5 system-ui,sans-serif;background:#eef3f9;color:#2c3e50;border-bottom:1px solid #cfdbe8;">残量を確認中…</div>
+<details id="ghBox" style="margin:10px 14px 4px;font:14px/1.6 system-ui,sans-serif;background:#fbfcfe;border:1px solid #d6e0ec;border-radius:10px;padding:8px 12px;">
+<summary style="cursor:pointer;font-weight:700;color:#1f3a5f;">☁ GitHubに自動で逃がす（容量を事実上むげんにする）</summary>
+<div style="margin-top:10px;display:grid;gap:10px;">
+  <label style="display:grid;gap:4px;">トークン（repo スコープ）
+    <input id="ghToken" type="password" readonly autocomplete="off" style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:14px;"></label>
+  <div style="display:grid;grid-template-columns:1fr 120px;gap:8px;">
+    <label style="display:grid;gap:4px;">リポジトリ名の頭
+      <input id="ghPrefix" readonly style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:14px;"></label>
+    <label style="display:grid;gap:4px;">上限MB
+      <input id="ghMaxMB" type="number" min="50" max="2000" step="50" readonly style="width:100%;padding:9px;border:1px solid #bbb;border-radius:8px;background:#f5f5f5;font-size:14px;"></label>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+    <button id="ghEdit" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">✎ 編集</button>
+    <button id="ghSaveBtn" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#dceaf7;font-size:14px;font-weight:700;">保存</button>
+    <button id="ghRun" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">今すぐバックアップ</button>
+  </div>
+  <div style="display:flex;gap:16px;flex-wrap:wrap;">
+    <label style="display:flex;gap:6px;align-items:center;"><input id="ghAuto" type="checkbox"> 自動でバックアップ</label>
+    <label style="display:flex;gap:6px;align-items:center;"><input id="ghEvict" type="checkbox"> 端末からは最新5本だけ残す</label>
+  </div>
+  <div id="ghStatus" style="font-size:13px;color:#2c3e50;">未設定</div>
+</div>
+</details>
 <div class="shell">
 
   <header class="topbar">
@@ -1903,6 +1926,7 @@ async function saveRecording(blob, duration, format) {
   updateStatusUI();
 
   await refreshList();
+  if (GH.cfg.auto && GH.cfg.token) setTimeout(() => { ghBackup(false); }, 800);
 
   if (persisted) {
     const item = els.list.querySelector('[data-id="' + recording.id + '"]');
@@ -1978,6 +2002,157 @@ function blobToDataURL(blob) {
   });
 }
 
+
+/* ================= GitHub バックアップ（端末から逃がして容量を空ける） ================= */
+const GH = { cfg: { token: '', prefix: 'voice-takes-old', maxMB: 500, auto: true, evict: true, keepLocal: 5, current: '' }, repos: [], busy: false };
+function ghLoad() { try { const j = JSON.parse(localStorage.getItem('ghbackup') || '{}'); if (j.cfg) Object.assign(GH.cfg, j.cfg); if (Array.isArray(j.repos)) GH.repos = j.repos; } catch (e) {} }
+function ghSaveCfg() { try { localStorage.setItem('ghbackup', JSON.stringify({ cfg: GH.cfg, repos: GH.repos })); } catch (e) {} }
+function ghStatus(t, kind) {
+  const el = document.getElementById('ghStatus');
+  if (!el) return;
+  el.textContent = t;
+  el.style.color = kind === 'err' ? '#b03a2e' : kind === 'ok' ? '#1e7e34' : '#2c3e50';
+}
+async function ghReq(path, opts) {
+  opts = opts || {};
+  const res = await fetch('https://api.github.com' + path, {
+    method: opts.method || 'GET',
+    headers: Object.assign({ Authorization: 'Bearer ' + GH.cfg.token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, opts.headers || {}),
+    body: opts.body
+  });
+  if (!res.ok) { let m = ''; try { m = (await res.text()).slice(0, 160); } catch (e) {} throw new Error(res.status + ' ' + m); }
+  if (res.status === 204) return null;
+  const t = await res.text();
+  return t ? JSON.parse(t) : null;
+}
+function abToB64(buf) {
+  const b = new Uint8Array(buf); let s = ''; const CH = 0x8000;
+  for (let i = 0; i < b.length; i += CH) s += String.fromCharCode.apply(null, b.subarray(i, i + CH));
+  return btoa(s);
+}
+function b64ToBlob(b64, mime) {
+  const bin = atob(b64); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return new Blob([u], { type: mime || 'audio/webm' });
+}
+async function ghCreateRepo(name) {
+  const c = await ghReq('/user/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, private: true, auto_init: true, description: '旧版の録音バックアップ' }) });
+  GH.repos.push(c.full_name); GH.cfg.current = c.full_name; ghSaveCfg();
+  return c.full_name;
+}
+async function ghRepoFor(extraBytes) {
+  if (!GH.cfg.token) throw new Error('トークン未設定');
+  if (!GH.repos.length) {
+    const arr = await ghReq('/user/repos?per_page=100&affiliation=owner&sort=created');
+    GH.repos = arr.filter((r) => r.name.indexOf(GH.cfg.prefix) === 0).map((r) => r.full_name);
+  }
+  let repo = GH.cfg.current && GH.repos.indexOf(GH.cfg.current) >= 0 ? GH.cfg.current : (GH.repos[GH.repos.length - 1] || '');
+  if (!repo) return ghCreateRepo(GH.cfg.prefix);
+  try {
+    const j = await ghReq('/repos/' + repo);
+    if ((j.size || 0) * 1024 + (extraBytes || 0) > GH.cfg.maxMB * 1048576) {
+      const n = GH.repos.filter((r) => r.indexOf(GH.cfg.prefix) === 0).length + 1;
+      return ghCreateRepo(GH.cfg.prefix + '-' + n);
+    }
+  } catch (e) { /* 見に行けなければそのまま使う */ }
+  GH.cfg.current = repo; ghSaveCfg();
+  return repo;
+}
+async function ghPut(repo, path, blob) {
+  const content = abToB64(await blob.arrayBuffer());
+  let sha = '';
+  try { const c = await ghReq('/repos/' + repo + '/contents/' + encodeURIComponent(path)); sha = c.sha; } catch (e) {}
+  const body = Object.assign({ message: 'add ' + path, content: content }, sha ? { sha: sha } : {});
+  await ghReq('/repos/' + repo + '/contents/' + encodeURIComponent(path), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+async function ghDel(repo, path) {
+  try {
+    const c = await ghReq('/repos/' + repo + '/contents/' + encodeURIComponent(path));
+    await ghReq('/repos/' + repo + '/contents/' + encodeURIComponent(path), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'del ' + path, sha: c.sha }) });
+  } catch (e) { /* 無くても無視 */ }
+}
+async function ghGet(repo, path) {
+  const j = await ghReq('/repos/' + repo + '/contents/' + encodeURIComponent(path));
+  return b64ToBlob(j.content, 'audio/webm');
+}
+function ghFileName(rec) { return String(rec.name || 'take').replace(/[\/\\:*?"<>|]/g, '_') + '.' + (rec.ext || 'webm'); }
+async function ghBlobOf(rec) { return rec.blob ? rec.blob : (rec.gh ? ghGet(rec.gh.repo, rec.gh.path) : null); }
+
+async function ghBackup(manual) {
+  if (GH.busy) return;
+  if (!GH.cfg.token) { if (manual) ghStatus('先にトークンを入れて「保存」を押してください', 'err'); return; }
+  GH.busy = true;
+  try {
+    const list = await DB.list();
+    const todo = list.filter((r) => r.blob && !r.gh);
+    if (manual) ghStatus('バックアップ中…（' + todo.length + '本）');
+    let sent = 0;
+    for (const rec of todo) {
+      const repo = await ghRepoFor(rec.size || 0);
+      const path = ghFileName(rec);
+      await ghPut(repo, path, rec.blob);
+      const gh = { repo: repo, path: path, at: Date.now() };
+      await DB.update(rec.id, { gh: gh });
+      rec.gh = gh; sent++;
+      if (manual) ghStatus('バックアップ中… ' + sent + '/' + todo.length);
+    }
+    let evicted = 0;
+    if (GH.cfg.evict) {
+      const all = (await DB.list()).filter((r) => r.blob).sort((a, b) => b.createdAt - a.createdAt);
+      for (let i = GH.cfg.keepLocal; i < all.length; i++) {
+        const r = all[i];
+        if (!r.gh) continue;
+        await DB.update(r.id, { blob: null, remoteOnly: true });
+        revokeObjectUrl(r.id);
+        evicted++;
+      }
+    }
+    await refreshList();
+    if (typeof updateStorageInfo === 'function') updateStorageInfo();
+    if (sent || evicted) ghStatus('送信 ' + sent + '本 / 端末から退避 ' + evicted + '本（GitHub上に残っています）', 'ok');
+    else ghStatus(todo.length ? 'すべて送信済みです' : 'バックアップする録音がありません', 'ok');
+  } catch (err) {
+    ghStatus('バックアップ失敗: ' + ((err && err.message) || '不明'), 'err');
+  } finally { GH.busy = false; }
+}
+
+(async function initGh() {
+  ghLoad();
+  const $i = (x) => document.getElementById(x);
+  if (!$i('ghToken')) return;
+  $i('ghToken').value = GH.cfg.token || '';
+  $i('ghPrefix').value = GH.cfg.prefix;
+  $i('ghMaxMB').value = GH.cfg.maxMB;
+  $i('ghAuto').checked = !!GH.cfg.auto;
+  $i('ghEvict').checked = !!GH.cfg.evict;
+  const lockFields = (locked) => {
+    ['ghToken', 'ghPrefix', 'ghMaxMB'].forEach((k) => {
+      const el = $i(k); el.readOnly = locked; el.style.background = locked ? '#f5f5f5' : '#fff';
+    });
+    $i('ghEdit').textContent = locked ? '✎ 編集' : '🔒 ロック';
+  };
+  lockFields(true);
+  $i('ghEdit').onclick = () => lockFields(!$i('ghToken').readOnly);
+  $i('ghSaveBtn').onclick = () => {
+    GH.cfg.token = $i('ghToken').value.trim();
+    GH.cfg.prefix = ($i('ghPrefix').value.trim() || 'voice-takes-old').replace(/\s+/g, '-');
+    const mb = parseInt($i('ghMaxMB').value, 10);
+    GH.cfg.maxMB = isFinite(mb) ? Math.max(50, Math.min(2000, mb)) : 500;
+    GH.cfg.auto = $i('ghAuto').checked;
+    GH.cfg.evict = $i('ghEvict').checked;
+    ghSaveCfg(); lockFields(true);
+    if (!GH.cfg.token) { ghStatus('トークンが空です', 'err'); return; }
+    ghStatus('トークンを確認中…');
+    ghReq('/user').then((u) => ghStatus('つながりました: ' + u.login + '（保存先 ' + (GH.cfg.current || GH.cfg.prefix) + '）', 'ok'))
+      .catch((e) => ghStatus('トークンが通りません: ' + e.message, 'err'));
+  };
+  $i('ghAuto').onchange = () => { GH.cfg.auto = $i('ghAuto').checked; ghSaveCfg(); };
+  $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
+  $i('ghRun').onclick = () => ghBackup(true);
+  if (GH.cfg.token) ghStatus('保存先 ' + (GH.cfg.current || GH.cfg.prefix) + ' ・ 準備OK', 'ok');
+})();
+
 async function refreshList() {
   try {
     state.recordings = await DB.list();
@@ -2011,7 +2186,7 @@ function buildItem(rec) {
   node.classList.toggle('is-playing', state.playingId === rec.id);
 
   node.querySelector('.rec-name').textContent = rec.name;
-  node.querySelector('.rec-ext').textContent = rec.label || rec.ext || 'AUDIO';
+  node.querySelector('.rec-ext').textContent = (rec.gh && !rec.blob ? '☁ GitHub ・ ' : '') + (rec.label || rec.ext || 'AUDIO');
   node.querySelector('.rec-duration').textContent = C.formatDurationCompact(rec.duration);
   node.querySelector('.rec-date').textContent = C.formatDateTime(rec.createdAt);
   node.querySelector('.rec-size').textContent = C.formatBytes(rec.size);
@@ -2059,6 +2234,21 @@ function onAudioError(event) {
 function togglePlay(rec) {
   if (state.playingId === rec.id) {
     stopPlayback();
+    return;
+  }
+  if (!rec.blob && rec.gh) {
+    state.playingId = rec.id;
+    showBanner('GitHubから読み込んでいます…', 'info');
+    ghBlobOf(rec).then((b) => {
+      if (!b) throw new Error('データなし');
+      hideBanner();
+      rec.blob = b;
+      state.playingId = null;
+      togglePlay(rec);
+    }).catch((err) => {
+      showBanner('GitHubから取れませんでした: ' + ((err && err.message) || '不明'));
+      stopPlayback();
+    });
     return;
   }
   if (state.audioEl) {
@@ -2189,6 +2379,7 @@ function requestDelete(button, rec) {
 
 async function removeRecording(rec) {
   stopPlayback();
+  if (rec.gh && GH.cfg.token) { ghDel(rec.gh.repo, rec.gh.path).catch(() => {}); }
   try {
     await DB.remove(rec.id);
   } catch (err) {
@@ -2232,6 +2423,14 @@ async function clearAll() {
 
 function downloadRecording(rec) {
   const fileName = C.buildFileName(rec.name, rec.ext);
+  if (!rec.blob && rec.gh) {
+    showBanner('GitHubから読み込んでいます…', 'info');
+    ghBlobOf(rec).then((b) => {
+      if (!b) throw new Error('データなし');
+      hideBanner(); rec.blob = b; downloadRecording(rec);
+    }).catch((err) => showBanner('GitHubから取れませんでした: ' + ((err && err.message) || '不明')));
+    return;
+  }
   const url = getObjectUrl(rec);
   if (url) {
     const a = document.createElement('a');
