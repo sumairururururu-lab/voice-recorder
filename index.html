@@ -2283,34 +2283,67 @@ function parseDateFromName(name) {
 }
 
 // GitHubにある録音を一覧に取り込む（別端末で録ったものもここに出る）
-async function fillDurations() {
-  const list = (state.recordings || []).filter((r) => !r.duration || r.duration <= 0);
-  if (!list.length) { showBanner('長さが分からない録音はありません', 'info'); return; }
-  if (GH.busy) return;
-  GH.busy = true;
-  let done = 0;
+async function probeDuration(blob) {
+  const url = URL.createObjectURL(blob);
   try {
-    for (const rec of list) {
-      setHint('長さを調べています… ' + (done + 1) + '/' + list.length);
+    return await new Promise((resolve) => {
+      const a = new Audio();
+      a.preload = 'metadata';
+      let settled = false;
+      const done = (v) => { if (settled) return; settled = true; resolve(isFinite(v) && v > 0 ? v : 0); };
+      const to = setTimeout(() => done(0), 15000);
+      a.addEventListener('loadedmetadata', () => {
+        if (isFinite(a.duration) && a.duration > 0) { clearTimeout(to); done(a.duration); }
+        else {
+          // webm は長さが Infinity になることがある → 大きい位置へ飛ばすと確定する
+          try { a.currentTime = 1e101; } catch (e) { done(0); }
+          a.addEventListener('timeupdate', () => {
+            clearTimeout(to);
+            try { a.currentTime = 0; } catch (e) {}
+            done(a.duration);
+          }, { once: true });
+        }
+      }, { once: true });
+      a.addEventListener('error', () => { clearTimeout(to); done(0); }, { once: true });
+      a.src = url;
+      a.load();
+    });
+  } finally { URL.revokeObjectURL(url); }
+}
+
+async function fillDurations() {
+  const btn = document.getElementById('ghLen');
+  const all = (state.recordings || []);
+  const list = all.filter((r) => !r.duration || r.duration <= 0 || !isFinite(r.duration));
+  if (!list.length) { showBanner('長さが分からない録音はありません（ぜんぶ表示済み）', 'info'); return; }
+  if (fillDurations.running) { showBanner('いま調べています… 終わるまで待ってね', 'info'); return; }
+  fillDurations.running = true;
+  showBanner('長さを調べています… 0/' + list.length + '本（音声を取り寄せるので数分かかります）', 'info');
+  let done = 0, failed = 0;
+  try {
+    for (let i = 0; i < list.length; i++) {
+      const rec = list[i];
+      const label = '長さを調べています… ' + (i + 1) + '/' + list.length + '本（成功 ' + done + '）';
+      if (btn) btn.textContent = '⏱ ' + (i + 1) + '/' + list.length;
+      setHint(label);
       try {
         const blob = await ghBlobOf(rec);
-        if (!blob) continue;
-        const url = URL.createObjectURL(blob);
-        const d = await new Promise((resolve) => {
-          const a = new Audio();
-          const to = setTimeout(() => resolve(0), 8000);
-          a.addEventListener('loadedmetadata', () => { clearTimeout(to); resolve(a.duration || 0); });
-          a.addEventListener('error', () => { clearTimeout(to); resolve(0); });
-          a.src = url;
-        });
-        URL.revokeObjectURL(url);
+        if (!blob) { failed++; continue; }
+        const d = await probeDuration(blob);
         if (d > 0) { rec.duration = d; await DB.update(rec.id, { duration: d }); done++; }
+        else failed++;
         renderList();
-      } catch (err) { /* 1本失敗しても続ける */ }
+      } catch (err) { failed++; }
     }
+    showBanner('おわりました：' + done + '本の長さが分かりました' + (failed ? '（' + failed + '本は読めませんでした）' : ''), 'info');
     setHint(done + '本の長さが分かりました');
-  } finally { GH.busy = false; }
-  renderList();
+  } catch (err) {
+    showBanner('長さ調べでエラー: ' + ((err && err.message) || '不明'));
+  } finally {
+    fillDurations.running = false;
+    if (btn) btn.textContent = '⏱ 長さを全部調べる';
+    renderList();
+  }
 }
 
 async function ghPull(manual) {
@@ -2444,7 +2477,10 @@ async function ghBackup(manual) {
   $i('ghEvict').onchange = () => { GH.cfg.evict = $i('ghEvict').checked; ghSaveCfg(); };
   $i('ghRun').onclick = () => ghBackup(true);
   if ($i('ghPull')) $i('ghPull').onclick = () => ghPull(true);
-  if ($i('ghLen')) $i('ghLen').onclick = () => fillDurations();
+  if ($i('ghLen')) $i('ghLen').addEventListener('click', () => {
+    $i('ghLen').textContent = '⏱ 準備中…';
+    setTimeout(() => { fillDurations(); }, 50);
+  });
   const sab = document.getElementById('shareAllBtn');
   if (sab) sab.onclick = () => shareAllRecordings();
   const fillMics = async () => {
