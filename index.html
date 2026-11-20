@@ -1768,9 +1768,12 @@ async function openWorkingMic() {
   if (best >= 0 && best < cands.length) {
     try {
       const st = await navigator.mediaDevices.getUserMedia(cands[best]);
-      const p = await probeStream(st, 400);
-      if (p.rms > 2.5e-3) {
-        return { stream: st, rms: p.rms, hiRel: p.hiRel, name: cands[best].name,
+      const tracks = st.getAudioTracks();
+      // 音量では判定しない（歌う前は静かなのが当たり前。前はここで毎回はじいて、
+      // 結局4通り全部やり直していた）。本当に無音のときだけ探し直す。
+      if (tracks.length && tracks[0].readyState === 'live') {
+        // 測らずにそのまま使う（ここで待つと遅くなる。無音かどうかは録音後のチェックで分かる）
+        return { stream: st, rms: 0, hiRel: -99, name: cands[best].name,
                  tried: 1, list: [cands[best].name], silent: false, cached: true };
       }
       st.getTracks().forEach((t) => t.stop());
@@ -1851,7 +1854,7 @@ async function startRecording() {
     } else {
       const db = got.rms > 0 ? (20 * Math.log10(got.rms)).toFixed(0) : '-99';
       setHint(got.cached
-        ? 'マイク: 前回と同じ「' + got.name + '」（入力 ' + db + 'dB）'
+        ? 'マイク: 前回と同じ「' + got.name + '」（すぐ開始）'
         : 'マイク自動選択: ' + got.tried + '通り試して「' + got.name + '」を採用（入力 ' + db + 'dB・高域 ' + got.hiRel.toFixed(0) + 'dB）');
     }
   } catch (err) {
