@@ -979,7 +979,11 @@ var __recorderWorkletUrl = (function () {
 
   /** 拡張子付きファイル名を組み立てる（既存の拡張子は付け直さない） */
   function buildFileName(base, ext) {
-    const safe = sanitizeFileName(base, 'recording');
+    let safe = sanitizeFileName(base, 'recording');
+    // 長すぎる名前はAndroidで保存に失敗して0バイトになることがある → 60文字まで
+    if (safe.length > 60) safe = safe.slice(0, 60).trim();
+    // 末尾のドット・空白はファイル名として無効
+    safe = safe.replace(/[. ]+$/, '') || 'recording';
     const e = String(ext || '').replace(/^\./, '');
     if (e && safe.toLowerCase().endsWith('.' + e.toLowerCase())) return safe;
     return e ? safe + '.' + e : safe;
@@ -3123,14 +3127,27 @@ async function saveAsRecording(rec) {
   try {
     const blob = await ghBlobOf(rec);
     if (!blob) { showBanner('データがありません'); return; }
+    if (!blob.size) { showBanner('音声データが空です（0バイト）。保存しませんでした。'); return; }
     const name = C.buildFileName(rec.name, rec.ext);
     if (typeof window.showSaveFilePicker === 'function') {
       try {
         const handle = await window.showSaveFilePicker({ suggestedName: name });
         const w = await handle.createWritable();
-        await w.write(blob);
+        // 一度に全部書くとSDカードで0バイトになる端末がある → 4MBずつ書く
+        const CH = 4 * 1024 * 1024;
+        for (let off = 0; off < blob.size; off += CH) {
+          await w.write(blob.slice(off, Math.min(off + CH, blob.size)));
+        }
         await w.close();
-        setHint('保存しました: ' + name);
+        // 本当に書けたか確認（0バイトなら保存し直す）
+        let wrote = 0;
+        try { wrote = (await handle.getFile()).size; } catch (e) { wrote = blob.size; }
+        if (wrote !== blob.size) {
+          showBanner('保存が途中で止まりました（' + wrote + 'バイト）。ダウンロードで保存し直します。');
+          downloadRecording(rec);
+          return;
+        }
+        setHint('保存しました: ' + name + '（' + (wrote / 1048576).toFixed(1) + 'MB）');
         return;
       } catch (err) {
         if (err && err.name === 'AbortError') return;      // キャンセル
@@ -3202,16 +3219,20 @@ async function shareAllRecordings() {
 function downloadRecording(rec) {
   if (rec.gone && !rec.blob) { goneMsg(); return; }
   const fileName = C.buildFileName(rec.name, rec.ext);
-  if (!rec.blob && rec.gh) {
-    showBanner('GitHubから読み込んでいます…', 'info');
-    ghBlobOf(rec).then((b) => {
-      if (!b) throw new Error('データなし');
-      hideBanner(); rec.blob = b; downloadRecording(rec);
-    }).catch((err) => showBanner('GitHubから取れませんでした: ' + ((err && err.message) || '不明')));
-    return;
-  }
-  const url = getObjectUrl(rec);
-  if (url) {
+  // 中身が空のまま「保存」すると0バイトのファイルができる → 先に必ず確認する
+  const reallyDownload = (blob) => {
+    if (!blob || !blob.size) {
+      showBanner('この録音の音声データが空です（0バイト）。保存しませんでした。GitHubに音声があれば「もう一度取得」を押してください。');
+      return;
+    }
+    rec.blob = blob;
+    // 使い回したURLが死んでいると0バイトになる → 毎回作り直す
+    if (typeof URL.revokeObjectURL === 'function') {
+      const oldUrl = state.objectUrls.get(rec.id);
+      if (oldUrl) { URL.revokeObjectURL(oldUrl); state.objectUrls.delete(rec.id); }
+    }
+    const url = URL.createObjectURL(blob);
+    state.objectUrls.set(rec.id, url);
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName;
@@ -3219,8 +3240,21 @@ function downloadRecording(rec) {
     document.body.appendChild(a);
     a.click();
     a.remove();
+    showBanner('保存しました: ' + fileName + '（' + (blob.size / 1048576).toFixed(1) + 'MB）',
+      'info');
+    // すぐには消さない（0バイトになる端末があるため60秒待つ）
+    setTimeout(() => revokeObjectUrl(rec.id), 60000);
+  };
+  if (!rec.blob && rec.gh) {
+    showBanner('GitHubから読み込んでいます…', 'info');
+    ghBlobOf(rec).then((b) => {
+      if (!b) throw new Error('データなし');
+      hideBanner(); reallyDownload(b);
+    }).catch((err) => showBanner('GitHubから取れませんでした: ' + ((err && err.message) || '不明')));
     return;
   }
+  if (rec.blob) { reallyDownload(rec.blob); return; }
+  showBanner('この録音は端末に音声が無く、GitHubにもありません（0バイトで保存される心配はありません）。');
   // createObjectURL が使えない環境では data URL で
   blobToDataURL(rec.blob)
     .then((dataUrl) => {
