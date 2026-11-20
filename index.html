@@ -729,7 +729,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 保存0バイト＋ブツ音修正版</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 0バイト＋ブツ音＋音の穴 修正版</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -2051,10 +2051,65 @@ function decimateTo16k(channels, srcRate) {
   return { channels: [out], rate: target };
 }
 
+/**
+ * 録音の途中に「完全な0」が連続している所（サンプルが来なかった穴）を詰める。
+ * そのままだと音が一瞬消えて「ブツ」と切れるので、5msのクロスフェードでつなぐ。
+ */
+function repairZeroGaps(channels, rate) {
+  const minGap = Math.max(24, Math.round(rate * 0.004));
+  const xf = Math.max(8, Math.round(rate * 0.005));
+  const out = [];
+  let fixed = 0;
+  for (const ch of channels) {
+    const gaps = [];
+    let i = 0;
+    while (i < ch.length) {
+      if (ch[i] !== 0) { i++; continue; }
+      let j = i;
+      while (j < ch.length && ch[j] === 0) j++;
+      if (j - i >= minGap && i > xf && j + xf < ch.length) {
+        let a = 0, b = 0;
+        for (let k = i - xf; k < i; k++) a += Math.abs(ch[k]);
+        for (let k = j; k < j + xf; k++) b += Math.abs(ch[k]);
+        if (a > xf * 0.00002 && b > xf * 0.00002) gaps.push([i, j]);
+      }
+      i = j;
+    }
+    if (!gaps.length) { out.push(ch); continue; }
+    fixed += gaps.length;
+    let nLen = ch.length;
+    for (const g of gaps) nLen -= (g[1] - g[0]) + xf;
+    const nch = new Float32Array(Math.max(1, nLen));
+    let w = 0, prev = 0;
+    for (const g of gaps) {
+      const gs = g[0], ge = g[1];
+      const headLen = (gs - xf) - prev;
+      if (headLen > 0) { nch.set(ch.subarray(prev, gs - xf), w); w += headLen; }
+      for (let k = 0; k < xf; k++) {
+        const t = (k + 1) / (xf + 1);
+        nch[w + k] = ch[gs - xf + k] * (1 - t) + ch[ge + k] * t;
+      }
+      w += xf;
+      prev = ge + xf;
+    }
+    const rest = ch.length - prev;
+    if (rest > 0) { nch.set(ch.subarray(prev), w); w += rest; }
+    out.push(nch.subarray(0, w));
+  }
+  return { channels: out, fixed: fixed };
+}
+
 function finalizeWav() {
   const chunks = state.wavChunks.concat(state.rescueChunks);
   state.wavChunks = []; state.rescueChunks = []; state.rescueSamples = 0;
-  const channels = concatWavChunks(chunks);
+  let channels = concatWavChunks(chunks);
+  // サンプルが来なかった「穴」を詰める（音が一瞬消える／ブツと切れるのを防ぐ）
+  let gapFixed = 0;
+  try {
+    const rep = repairZeroGaps(channels, state.wavSampleRate);
+    channels = rep.channels; gapFixed = rep.fixed;
+  } catch (err) { /* 失敗しても録音は続行 */ }
+  state.gapFixed = gapFixed;
   const measured = elapsedMs() / 1000;
 
   if (!channels.length || !channels[0].length) {
@@ -2084,6 +2139,11 @@ function finalizeWav() {
   const frames = channels[0].length;
   const duration = outRate ? frames / outRate : measured;
   saveRecording(blob, duration, { mime: 'audio/wav', ext: 'wav', label: 'WAV' });
+  if (gapFixed > 0) {
+    setTimeout(function () {
+      showBanner('録音の途中にあった音の穴（' + gapFixed + 'か所）をふさぎました。', 'info');
+    }, 400);
+  }
 }
 
 function recDiag() {
