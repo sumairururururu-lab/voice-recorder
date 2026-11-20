@@ -708,6 +708,7 @@ document.addEventListener('DOMContentLoaded', function () {
         <option value="">（自動）</option>
       </select></label>
     <button id="micRefresh" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">マイク一覧を更新</button>
+    <button id="micRepick" type="button" style="padding:8px 14px;border:1px solid #9db6d3;border-radius:8px;background:#eef3f9;font-size:14px;">マイクを選び直す（次は3〜4秒かかります）</button>
   </div>
   <div style="border-top:1px dashed #cfdbe8;padding-top:8px;">
     <label style="display:flex;gap:8px;align-items:center;">
@@ -729,7 +730,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 0バイト＋ブツ音＋音の穴 修正版</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 マイク即開始版</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -1708,7 +1709,7 @@ function pickFormat() {
 function micSavedId() { try { return localStorage.getItem('micDev') || ''; } catch (e) { return ''; } }
 
 // そのストリームが本当に音を出しているか確かめる（完全な無音を弾く）
-async function probeStream(st) {
+async function probeStream(st, waitMs) {
   const AC = window.AudioContext || window.webkitAudioContext;
   let c = null;
   try {
@@ -1719,7 +1720,7 @@ async function probeStream(st) {
     an.fftSize = 4096;
     an.smoothingTimeConstant = 0;
     src.connect(an);
-    await new Promise((r) => setTimeout(r, 700));
+    await new Promise((r) => setTimeout(r, waitMs || 700));
     const buf = new Float32Array(an.fftSize);
     an.getFloatTimeDomainData(buf);
     let e = 0;
@@ -1745,6 +1746,12 @@ async function probeStream(st) {
 }
 
 // 無音のマイクをつかまされても、設定を変えて自動で取り直す
+function micBestIdx() {
+  try { const v = localStorage.getItem('micBestIdx'); return v === null ? -1 : parseInt(v, 10); } catch (e) { return -1; }
+}
+function micBestSet(i) { try { localStorage.setItem('micBestIdx', String(i)); } catch (e) { /* 無視 */ } }
+function micBestClear() { try { localStorage.removeItem('micBestIdx'); } catch (e) { /* 無視 */ } }
+
 async function openWorkingMic() {
   const dev = micSavedId();
   const base = dev ? { deviceId: { exact: dev } } : {};
@@ -1756,6 +1763,19 @@ async function openWorkingMic() {
   ];
   const results = [];
   let lastErr = null;
+  // 前回うまくいった設定があれば、それだけ試してすぐ始める（毎回3〜4秒待たせない）
+  const best = micBestIdx();
+  if (best >= 0 && best < cands.length) {
+    try {
+      const st = await navigator.mediaDevices.getUserMedia(cands[best]);
+      const p = await probeStream(st, 400);
+      if (p.rms > 2.5e-3) {
+        return { stream: st, rms: p.rms, hiRel: p.hiRel, name: cands[best].name,
+                 tried: 1, list: [cands[best].name], silent: false, cached: true };
+      }
+      st.getTracks().forEach((t) => t.stop());
+    } catch (e) { lastErr = e; }
+  }
   for (const c of cands) {
     let st = null;
     try { st = await navigator.mediaDevices.getUserMedia(c); } catch (e) { lastErr = e; continue; }
@@ -1772,6 +1792,9 @@ async function openWorkingMic() {
     pick = results.slice().sort((a, b) => b.rms - a.rms)[0];
   }
   results.forEach((r) => { if (r !== pick) r.stream.getTracks().forEach((t) => t.stop()); });
+  // 次回からは、この設定をすぐ使う
+  const pickIdx = cands.findIndex((c) => c.name === pick.name);
+  if (pickIdx >= 0) micBestSet(pickIdx);
   return { stream: pick.stream, rms: pick.rms, hiRel: pick.hiRel, name: pick.name, tried: results.length, list: results.map((r) => r.name), silent: pick.rms <= 1e-7 };
 }
 
@@ -1827,7 +1850,9 @@ async function startRecording() {
         + '他のタブやアプリがマイクを使っていないか確認するか、下の設定でマイクを選び直してください。', 'info');
     } else {
       const db = got.rms > 0 ? (20 * Math.log10(got.rms)).toFixed(0) : '-99';
-      setHint('マイク自動選択: ' + got.tried + '通り試して「' + got.name + '」を採用（入力 ' + db + 'dB・高域 ' + got.hiRel.toFixed(0) + 'dB）');
+      setHint(got.cached
+        ? 'マイク: 前回と同じ「' + got.name + '」（入力 ' + db + 'dB）'
+        : 'マイク自動選択: ' + got.tried + '通り試して「' + got.name + '」を採用（入力 ' + db + 'dB・高域 ' + got.hiRel.toFixed(0) + 'dB）');
     }
   } catch (err) {
     const blocked = (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError'));
@@ -2850,6 +2875,10 @@ async function ghBackup(manual) {
   };
   fillMics();
   if ($i('micRefresh')) $i('micRefresh').onclick = fillMics;
+  if ($i('micRepick')) $i('micRepick').onclick = () => {
+    micBestClear();
+    setHint('次に録音を押したとき、マイクの設定を4通り試し直します（3〜4秒）');
+  };
   if ($i('micPick')) $i('micPick').onchange = () => {
     try { localStorage.setItem('micDev', $i('micPick').value || ''); } catch (err) { /* 無視 */ }
     setHint($i('micPick').value ? 'マイクを選びました（次の録音から）' : 'マイクを自動に戻しました');
