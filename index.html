@@ -729,7 +729,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 保存0バイト修正版</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 保存0バイト＋ブツ音修正版</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -884,7 +884,48 @@ document.addEventListener('DOMContentLoaded', function () {
 </template>
 
 <script>
-var __recorderWorkletCode = "/**\n * AudioWorklet: 録音中の生 PCM (Float32) をメインスレッドへ送る。\n * WAV 書き出し用のデータ収集に使います。\n */\nclass RecorderProcessor extends AudioWorkletProcessor {\n  process(inputs, outputs) {\n    const input = inputs && inputs[0];\n    if (input && input.length && input[0] && input[0].length) {\n      const frames = input.map((channel) => Float32Array.from(channel));\n      this.port.postMessage(frames, frames.map((f) => f.buffer));\n    }\n    // 出力は無音にする（モニター経路に繋いでも音が鳴らないように）\n    if (outputs) {\n      for (const output of outputs) {\n        for (const channel of output) channel.fill(0);\n      }\n    }\n    return true;\n  }\n}\n\nregisterProcessor('recorder-processor', RecorderProcessor);\n";
+var __recorderWorkletCode = [
+"class RecorderProcessor extends AudioWorkletProcessor {",
+"  constructor() {",
+"    super();",
+"    this.ch = 0; this.bufs = null; this.len = 0; this.target = 4096;",
+"    this.port.onmessage = (e) => {",
+"      if (e.data === 'flush') this.flush();",
+"    };",
+"  }",
+"  flush() {",
+"    if (!this.bufs || !this.len) { this.bufs = null; this.len = 0; return; }",
+"    const out = this.bufs.map((b) => b.slice(0, this.len));",
+"    this.port.postMessage(out, out.map((b) => b.buffer));",
+"    this.bufs = null; this.len = 0;",
+"  }",
+"  process(inputs, outputs) {",
+"    const input = inputs && inputs[0];",
+"    if (input && input.length && input[0] && input[0].length) {",
+"      const n = input[0].length;",
+"      if (!this.bufs) {",
+"        this.ch = input.length;",
+"        this.bufs = [];",
+"        for (let c = 0; c < this.ch; c++) this.bufs.push(new Float32Array(this.target));",
+"        this.len = 0;",
+"      }",
+"      for (let c = 0; c < this.ch; c++) {",
+"        const src = input[c] || input[0];",
+"        if (this.len + n <= this.target) this.bufs[c].set(src, this.len);",
+"      }",
+"      this.len += n;",
+"      if (this.len >= this.target) this.flush();",
+"    }",
+"    if (outputs) {",
+"      for (const output of outputs) {",
+"        for (const channel of output) channel.fill(0);",
+"      }",
+"    }",
+"    return true;",
+"  }",
+"}",
+"registerProcessor('recorder-processor', RecorderProcessor);"
+].join("\n");
 var __recorderWorkletUrl = (function () {
   try {
     if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
@@ -1085,11 +1126,19 @@ var __recorderWorkletUrl = (function () {
     view.setUint32(40, dataSize, true);
 
     let offset = 44;
+    // 録音の頭とお尻の15msをなめらかにする（開始・停止の「ブツ」音を消す）
+    const fade = Math.min(Math.floor(rate * 0.015), Math.floor(numFrames / 4));
     for (let i = 0; i < numFrames; i++) {
+      let gain = 1;
+      if (fade > 0) {
+        if (i < fade) gain = i / fade;
+        else if (i >= numFrames - fade) gain = Math.max(0, (numFrames - 1 - i) / fade);
+      }
       for (let ch = 0; ch < numChannels; ch++) {
         const src = list[ch];
         let sample = src && i < src.length ? src[i] : 0;
         if (!isFinite(sample)) sample = 0;
+        if (gain !== 1) sample *= gain;
         sample = sample < -1 ? -1 : sample > 1 ? 1 : sample;
         view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
         offset += 2;
@@ -1834,7 +1883,7 @@ async function startRecording() {
       if (useWorklet) {
         const node = new AudioWorkletNode(ctx, 'recorder-processor', { numberOfOutputs: 1 });
         node.port.onmessage = (event) => {
-          if (state.status === 'recording' && event.data) state.wavChunks.push(event.data);
+          if ((state.status === 'recording' || state.status === 'stopping') && Array.isArray(event.data)) state.wavChunks.push(event.data);
         };
         source.connect(node);
         node.connect(zeroGain);
@@ -1842,7 +1891,7 @@ async function startRecording() {
       } else if (typeof ctx.createScriptProcessor === 'function') {
         const node = ctx.createScriptProcessor(4096, 1, 1);
         node.onaudioprocess = (event) => {
-          if (state.status !== 'recording') return;
+          if (state.status !== 'recording' && state.status !== 'stopping') return;
           state.wavChunks.push([Float32Array.from(event.inputBuffer.getChannelData(0))]);
         };
         source.connect(node);
@@ -1972,7 +2021,14 @@ function stopRecording() {
       finalizeCompressed(elapsedMs() / 1000);
     }
   } else {
-    finalizeWav();
+    // ワークレットに溜まっている残りを先に受け取ってから確定する
+    const node = state.captureNode;
+    if (node && node.port && typeof node.port.postMessage === 'function') {
+      try { node.port.postMessage('flush'); } catch (err) { /* 無視 */ }
+      setTimeout(() => finalizeWav(), 150);
+    } else {
+      finalizeWav();
+    }
   }
 }
 
