@@ -596,6 +596,12 @@ html[data-theme="dark"] .icon-moon { display: none; }
   color: var(--text);
 }
 .seek-btn:active { transform: scale(.97); }
+.seek-btn.rep.is-on {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+  font-weight: 700;
+}
 
 .action-btn {
   display: grid;
@@ -730,7 +736,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 2026-11-20 マイク即開始版</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· リピート再生対応</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -861,6 +867,7 @@ document.addEventListener('DOMContentLoaded', function () {
       <div class="rec-progress"><span class="rec-progress-bar"></span></div>
       <div class="rec-seek">
         <button class="seek-btn back" type="button" title="10秒もどる">↺10</button>
+        <button class="seek-btn rep" type="button" title="リピート：再生が終わったら、もう一度最初から鳴ります" aria-pressed="false">🔁</button>
         <button class="seek-btn fwd" type="button" title="10秒すすむ">10↻</button>
       </div>
     </div>
@@ -1339,6 +1346,8 @@ const MIME_CANDIDATES = [
 
 const state = {
   status: 'idle',              // idle | recording | paused | stopping
+  // リピート再生（端末に覚える。再生が終わったら最初からもう一回）
+  repeat: (function () { try { return localStorage.getItem('playRepeat') === '1'; } catch (err) { return false; } })(),
   stream: null,
   audioContext: null,
   sourceNode: null,
@@ -3004,12 +3013,42 @@ function buildItem(rec) {
   };
   if (jb) jb.addEventListener('click', (ev) => { ev.stopPropagation(); jump(-10); });
   if (jf) jf.addEventListener('click', (ev) => { ev.stopPropagation(); jump(10); });
+  const rb = node.querySelector('.seek-btn.rep');
+  if (rb) {
+    const paintRep = () => {
+      rb.classList.toggle('is-on', !!state.repeat);
+      rb.setAttribute('aria-pressed', state.repeat ? 'true' : 'false');
+    };
+    paintRep();
+    rb.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      state.repeat = !state.repeat;
+      try { localStorage.setItem('playRepeat', state.repeat ? '1' : ''); } catch (err) { /* 無視 */ }
+      document.querySelectorAll('.seek-btn.rep').forEach((b) => {
+        b.classList.toggle('is-on', !!state.repeat);
+        b.setAttribute('aria-pressed', state.repeat ? 'true' : 'false');
+      });
+      setHint(state.repeat ? 'リピート オン：再生が終わると、もう一度最初から鳴ります' : 'リピート オフ');
+    });
+  }
   node.querySelector('.delete').addEventListener('click', (event) => requestDelete(event.currentTarget, rec));
 
   return node;
 }
 
 /* ---------- 再生 ---------- */
+
+// リピートがオンなら、終わったら最初からもう一回。オフなら今までどおり停止。
+function onEnded() {
+  const audio = state.audioEl;
+  if (state.repeat && audio) {
+    try { audio.currentTime = 0; } catch (err) { /* 無視 */ }
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => { stopPlayback(); });
+    return;
+  }
+  stopPlayback();
+}
 
 function stopPlayback() {
   if (state.audioEl) {
@@ -3019,7 +3058,7 @@ function stopPlayback() {
     audio.onended = null;
     audio.onerror = null;
     if (typeof audio.removeEventListener === 'function') {
-      audio.removeEventListener('ended', stopPlayback);
+      audio.removeEventListener('ended', onEnded);
       audio.removeEventListener('error', onAudioError);
     }
     try { audio.pause(); } catch (err) { /* 無視 */ }
@@ -3076,7 +3115,7 @@ function togglePlay(rec) {
         if (state.playingId !== rec.id) return;   // 待っている間に別の操作があった
         const a = new Audio(dataUrl);
         state.audioEl = a;
-        a.addEventListener('ended', stopPlayback);
+        a.addEventListener('ended', onEnded);
         a.addEventListener('error', onAudioError);
         a.play().catch((err) => {
           if (!state.audioEl) return;   // 停止済みなら無視
@@ -3107,7 +3146,7 @@ function togglePlay(rec) {
       }
     } catch (err) { /* 無視 */ }
   });
-  audio.addEventListener('ended', stopPlayback);
+  audio.addEventListener('ended', onEnded);
   audio.addEventListener('error', onAudioError);
   audio.play().catch((err) => {
     showBanner('再生できませんでした: ' + ((err && err.message) || '不明なエラー'));
