@@ -2407,28 +2407,37 @@ async function ghCreateRepo(name) {
 }
 async function ghLoadRepos() {
   if (!GH.cfg.token) return [];
-  if (!GH.repos.length) {
+  if (Date.now() - (GH.lastRepoFetch || 0) < 60000) return GH.repos;   // 60秒以内は使い回し
+  try {
     const arr = await ghReq('/user/repos?per_page=100&affiliation=owner&sort=created');
-    GH.repos = arr.filter((r) => r.name.indexOf(GH.cfg.prefix) === 0).map((r) => r.full_name);
+    const list = arr.filter((r) => r.name.indexOf(GH.cfg.prefix) === 0).map((r) => r.full_name);
+    if (list.length) GH.repos = list;   // 毎回取り直す（新しいリポジトリを見落とさない）
     ghSaveCfg();
-  }
+  } catch (e) { /* 取れなければ前回のまま使う */ }
+  GH.lastRepoFetch = Date.now();
   return GH.repos;
 }
 
 async function ghRepoFor(extraBytes) {
   if (!GH.cfg.token) throw new Error('トークン未設定');
   await ghLoadRepos();
-  let repo = GH.cfg.current && GH.repos.indexOf(GH.cfg.current) >= 0 ? GH.cfg.current : (GH.repos[GH.repos.length - 1] || '');
-  if (!repo) return ghCreateRepo(GH.cfg.prefix);
-  try {
-    const j = await ghReq('/repos/' + repo);
-    if ((j.size || 0) * 1024 + (extraBytes || 0) > GH.cfg.maxMB * 1048576) {
-      const n = GH.repos.filter((r) => r.indexOf(GH.cfg.prefix) === 0).length + 1;
-      return ghCreateRepo(GH.cfg.prefix + '-' + n);
-    }
-  } catch (e) { /* 見に行けなければそのまま使う */ }
-  GH.cfg.current = repo; ghSaveCfg();
-  return repo;
+  const fits = async (repo) => {
+    try {
+      const j = await ghReq('/repos/' + repo);
+      return (j.size || 0) * 1024 + (extraBytes || 0) <= GH.cfg.maxMB * 1048576;
+    } catch (e) { return true; }   // 見に行けなければそのまま使う
+  };
+  // 今のリポジトリ → 一覧の新しい順に、空きがある所を探す（満杯でも無駄な新規を作らない）
+  const order = [];
+  if (GH.cfg.current && GH.repos.indexOf(GH.cfg.current) >= 0) order.push(GH.cfg.current);
+  for (let i = GH.repos.length - 1; i >= 0; i--) if (order.indexOf(GH.repos[i]) < 0) order.push(GH.repos[i]);
+  for (const repo of order) {
+    if (await fits(repo)) { GH.cfg.current = repo; ghSaveCfg(); return repo; }
+  }
+  if (!order.length) return ghCreateRepo(GH.cfg.prefix);
+  const used = new Set(GH.repos.map((r) => r.split('/').pop()));
+  let n = 1; while (used.has(GH.cfg.prefix + '-' + n)) n++;
+  return ghCreateRepo(GH.cfg.prefix + '-' + n);   // どれも満杯のときだけ次の番号を作る
 }
 async function ghPut(repo, path, blob) {
   const content = abToB64(await blob.arrayBuffer());
