@@ -736,7 +736,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· リピート/シーク改善版</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· シーク修正②（webm対応）</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -3056,6 +3056,7 @@ function audioDur(audio) {
 
 // リピートがオンなら、終わったら最初からもう一回。オフなら今までどおり停止。
 function onEnded() {
+  if (state.durFixing) return;   // 長さ確認で末尾へ飛ばしたときの「終了」は本物じゃないので無視
   const audio = state.audioEl;
   if (state.repeat && audio) {
     try { audio.currentTime = 0; } catch (err) { /* 無視 */ }
@@ -3064,6 +3065,70 @@ function onEnded() {
     return;
   }
   stopPlayback();
+}
+
+// 鳴らしながら長さを確定させる（止めたままの確認で取れなかったときの最終手段）。
+// 末尾の遠くへ一度飛ばす→長さが決まる→元の位置へ戻して再生を続ける。
+function fixUnknownDurationLive(audio) {
+  if (audioDur(audio) > 0) return;
+  state.durFixing = audio;
+  const back = audio.currentTime;
+  const restore = () => {
+    if (state.durFixing !== audio) return;
+    state.durFixing = null;
+    audio.removeEventListener('durationchange', onDC);
+    try { audio.currentTime = back; } catch (err) { /* 無視 */ }
+    if (audio.paused && state.audioEl === audio) {
+      const p = audio.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+  };
+  const onDC = () => { if (audioDur(audio) > 0) setTimeout(restore, 60); };
+  audio.addEventListener('durationchange', onDC);
+  setTimeout(restore, 1500);
+  try { audio.currentTime = 1e101; } catch (err) { restore(); }
+}
+
+// 再生を始める。webmなど「長さ不明」の録音は、まず止めたまま長さを確定させてから鳴らす。
+// （音は出ないので glitch にならない。1.2秒以内に決まらなければ、そのまま普通に再生する）
+function playAudioElement(audio, rec) {
+  let started = false;
+  const begin = () => {
+    if (started || state.audioEl !== audio) return;
+    started = true;
+    const p = audio.play();
+    if (p && p.then) p.then(() => {
+      // それでも長さが分からなければ、鳴らしながら確定させる（1回だけ）
+      if (!audioDur(audio)) fixUnknownDurationLive(audio);
+    }).catch((err) => {
+      if (!state.audioEl) return;   // 停止済みなら無視
+      showBanner('再生できませんでした: ' + ((err && err.message) || '不明なエラー'));
+      stopPlayback();
+    });
+    renderList();
+    startProgressLoop();
+  };
+  const whenMeta = () => {
+    if (audioDur(audio) > 0) { begin(); return; }
+    if (started) { if (!audioDur(audio)) fixUnknownDurationLive(audio); return; }
+    // 止めたまま末尾の遠くへ飛ばすと、ブラウザが長さを計算して durationchange を出す
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      audio.removeEventListener('durationchange', onChange);
+      try { audio.currentTime = 0; } catch (err) { /* 無視 */ }
+      begin();
+    };
+    const onChange = () => { if (audioDur(audio) > 0) finish(); };
+    audio.addEventListener('durationchange', onChange);
+    setTimeout(finish, 1200);
+    try { audio.currentTime = 1e101; } catch (err) { finish(); }
+  };
+  if (audio.readyState >= 1) whenMeta();
+  else {
+    audio.addEventListener('loadedmetadata', whenMeta, { once: true });
+    setTimeout(begin, 900);   // metadata が来なくても、再生だけは始める
+  }
 }
 
 function stopPlayback() {
@@ -3133,12 +3198,7 @@ function togglePlay(rec) {
         state.audioEl = a;
         a.addEventListener('ended', onEnded);
         a.addEventListener('error', onAudioError);
-        a.play().catch((err) => {
-          if (!state.audioEl) return;   // 停止済みなら無視
-          showBanner('再生できませんでした: ' + ((err && err.message) || '不明なエラー'));
-          stopPlayback();
-        });
-        startProgressLoop();
+        playAudioElement(a, rec);
       })
       .catch(() => {
         showBanner('この録音を再生できませんでした。ダウンロードして開いてください。');
@@ -3164,13 +3224,7 @@ function togglePlay(rec) {
   });
   audio.addEventListener('ended', onEnded);
   audio.addEventListener('error', onAudioError);
-  audio.play().catch((err) => {
-    showBanner('再生できませんでした: ' + ((err && err.message) || '不明なエラー'));
-    stopPlayback();
-  });
-
-  renderList();
-  startProgressLoop();
+  playAudioElement(audio, rec);
 }
 
 function attachSeek(div) {
