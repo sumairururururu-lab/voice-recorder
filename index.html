@@ -736,7 +736,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· リピート再生対応</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· リピート/シーク改善版</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -3008,8 +3008,9 @@ function buildItem(rec) {
   const jf = node.querySelector('.seek-btn.fwd');
   const jump = (sec) => {
     const audio = state.audioEl;
-    if (!audio || !isFinite(audio.duration)) return;
-    audio.currentTime = Math.min(audio.duration, Math.max(0, audio.currentTime + sec));
+    const d = audioDur(audio);
+    if (!audio || !d) return;
+    audio.currentTime = Math.min(d, Math.max(0, audio.currentTime + sec));
   };
   if (jb) jb.addEventListener('click', (ev) => { ev.stopPropagation(); jump(-10); });
   if (jf) jf.addEventListener('click', (ev) => { ev.stopPropagation(); jump(10); });
@@ -3037,6 +3038,21 @@ function buildItem(rec) {
 }
 
 /* ---------- 再生 ---------- */
+
+// webmなど「長さがヘッダに書かれていない」録音は、duration が Infinity になる。
+// ローカルのファイルなら seekable の末端が本当の長さなので、そこから取る。
+// これが分かれば、バーでの移動も10秒スキップも使える。
+function audioDur(audio) {
+  if (!audio) return 0;
+  if (isFinite(audio.duration) && audio.duration > 0) return audio.duration;
+  try {
+    if (audio.seekable && audio.seekable.length) {
+      const e = audio.seekable.end(audio.seekable.length - 1);
+      if (isFinite(e) && e > 0) return e;
+    }
+  } catch (err) { /* 無視 */ }
+  return 0;
+}
 
 // リピートがオンなら、終わったら最初からもう一回。オフなら今までどおり停止。
 function onEnded() {
@@ -3139,8 +3155,8 @@ function togglePlay(rec) {
 
   audio.addEventListener('loadedmetadata', () => {
     try {
-      const d = audio.duration;
-      if (!rec.duration && isFinite(d) && d > 0) {
+      const d = audioDur(audio);   // webmなど長さ不明のぶんは seekable から取れる
+      if (!rec.duration && d > 0) {
         rec.duration = d;
         DB.update(rec.id, { duration: d }).then(() => renderList()).catch(() => {});
       }
@@ -3164,11 +3180,12 @@ function attachSeek(div) {
   bar.style.touchAction = 'none';
   const move = (ev) => {
     const audio = state.audioEl;
-    if (!audio || !isFinite(audio.duration) || audio.duration <= 0) return;
+    const d = audioDur(audio);
+    if (!audio || !d) return;
     const r = bar.getBoundingClientRect();
     if (!r.width) return;
     const x = Math.min(Math.max(ev.clientX - r.left, 0), r.width);
-    audio.currentTime = (x / r.width) * audio.duration;
+    audio.currentTime = (x / r.width) * d;
   };
   let dragging = false;
   bar.addEventListener('pointerdown', (ev) => {
@@ -3195,11 +3212,12 @@ function startProgressLoop() {
     const id = state.playingId;
     if (!audio || !id) return;
     const item = els.list.querySelector('[data-id="' + id + '"] .rec-progress-bar');
-    if (item && audio.duration && isFinite(audio.duration)) {
-      item.style.width = Math.min(100, (audio.currentTime / audio.duration) * 100).toFixed(2) + '%';
+    const d = audioDur(audio);
+    if (item && d) {
+      item.style.width = Math.min(100, (audio.currentTime / d) * 100).toFixed(2) + '%';
       const row = els.list.querySelector('[data-id="' + id + '"]');
       const durEl = row && row.querySelector('.rec-duration');
-      if (durEl) durEl.textContent = fmtTime(audio.currentTime) + ' / ' + fmtTime(audio.duration) + '（バーをタップで移動）';
+      if (durEl) durEl.textContent = fmtTime(audio.currentTime) + ' / ' + fmtTime(d) + '（バーをタップで移動）';
     }
     state.progressRafId = requestAnimationFrame(tick);
   };
