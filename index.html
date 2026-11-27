@@ -736,7 +736,7 @@ document.addEventListener('DOMContentLoaded', function () {
       </span>
       <div>
         <h1>ボイスレコーダー</h1>
-        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· シーク修正②（webm対応）</span></p>
+        <p class="brand-sub">録音して、名前を付けて、あとから聴き返す <span style="opacity:.7">· 高音質WAV（HQフィルタ）</span></p>
       </div>
     </div>
     <button id="themeToggle" class="icon-btn" type="button" title="表示を切り替え" aria-label="表示を切り替え">
@@ -2112,19 +2112,107 @@ function stopRecording() {
 
 const concatWavChunks = C.concatWavChunks;
 
-// 48kHz などのPCMを 16kHz に間引く（声の分析に十分・容量は約1/3）
-function decimateTo16k(channels, srcRate) {
-  const target = 24000;   // 16k→24kに上げて高域（2〜8kHz）を残す
+// 48kHz などのPCMを 24kHz に変換する（高音質版）
+// 前は「2つの音を平均するだけ」だったので、8〜12kHz（声のツヤ・息・サ行）が少し削れ、
+// 12kHz より上の音が折り返して小さな雑音になっていた。
+// いまは窓付きsinc（カイザー窓・64タップ）のローパスで、約9.5kHzまで平らに残し、
+// 12kHz より上はしっかり消してから間引く（スタジオ用ソフトと同じやり方）。
+const HQ_RS = { taps: 32, phases: 512, beta: 7.0, cutoff: 0.455 };
+function hqBesselI0(x) {
+  let sum = 1, term = 1;
+  for (let k = 1; k < 40; k++) { term *= (x / (2 * k)) * (x / (2 * k)); sum += term; if (term < 1e-12 * sum) break; }
+  return sum;
+}
+function hqBuildTable(srcRate, dstRate) {
+  const H = HQ_RS.taps, P = HQ_RS.phases;
+  const step = srcRate / dstRate;
+  const fc = (HQ_RS.cutoff * dstRate) / srcRate;           // 入力サンプル単位のカットオフ（cycles/sample）
+  const i0b = hqBesselI0(HQ_RS.beta);
+  const L = 2 * H;
+  // 位相ごとのフィルタ表を先に作る（DCゲイン=1に正規化）
+  const table = new Float32Array((P + 1) * L);
+  for (let p = 0; p <= P; p++) {
+    const frac = p / P;
+    let sum = 0;
+    for (let j = 0; j < L; j++) {
+      const x = (j - H + 1) - frac;                      // 中心からの距離（入力サンプル）
+      const r = x / H;
+      let w = 0;
+      if (Math.abs(r) < 1) w = hqBesselI0(HQ_RS.beta * Math.sqrt(1 - r * r)) / i0b;
+      const t = 2 * fc * x;
+      const sinc = Math.abs(t) < 1e-9 ? 1 : Math.sin(Math.PI * t) / (Math.PI * t);
+      const v = 2 * fc * sinc * w;
+      table[p * L + j] = v; sum += v;
+    }
+    for (let j = 0; j < L; j++) table[p * L + j] /= sum;
+  }
+  return { table: table, H: H, P: P, L: L, step: step };
+}
+function hqResampleBlock(inCh, out, i0, i1, T) {
+  const table = T.table, H = T.H, P = T.P, L = T.L, step = T.step;
+  const last = inCh.length - 1;
+  for (let i = i0; i < i1; i++) {
+    const t = i * step;
+    let k0 = Math.floor(t);
+    const p = Math.round((t - k0) * P);
+    const base = p * L;
+    const start = k0 - H + 1;
+    let acc = 0;
+    if (start >= 0 && start + L - 1 <= last) {
+      for (let j = 0; j < L; j++) acc += inCh[start + j] * table[base + j];
+    } else {
+      for (let j = 0; j < L; j++) {
+        let idx = start + j;
+        if (idx < 0) idx = 0; else if (idx > last) idx = last;   // 端は端の値でうめる
+        acc += inCh[idx] * table[base + j];
+      }
+    }
+    out[i] = acc;
+  }
+}
+function hqResample(inCh, srcRate, dstRate) {
+  const T = hqBuildTable(srcRate, dstRate);
+  const out = new Float32Array(Math.floor(inCh.length / T.step));
+  hqResampleBlock(inCh, out, 0, out.length, T);
+  return out;
+}
+// 画面が固まらないように、少しずつ（約2秒ぶんずつ）変換して進み具合を出す
+async function decimateTo24kAsync(channels, srcRate, onProgress) {
+  const target = 24000;
   if (!srcRate || srcRate <= target) return { channels: channels, rate: srcRate || target };
-  const step = srcRate / target;
+  try {
+    const inCh = channels[0];
+    const T = hqBuildTable(srcRate, target);
+    const out = new Float32Array(Math.floor(inCh.length / T.step));
+    const BLOCK = 48000;
+    for (let i = 0; i < out.length; i += BLOCK) {
+      hqResampleBlock(inCh, out, i, Math.min(out.length, i + BLOCK), T);
+      if (onProgress) { try { onProgress(Math.min(1, (i + BLOCK) / out.length)); } catch (e) { /* 無視 */ } }
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    return { channels: [out], rate: target };
+  } catch (err) {
+    return decimateTo16k(channels, srcRate);   // だめなら一気に（さらにだめなら前の方法）
+  }
+}
+function decimateTo16k(channels, srcRate) {
+  const target = 24000;   // 24kHz（12kHzまで録れる・声も口笛C8も全部入る）
+  if (!srcRate || srcRate <= target) return { channels: channels, rate: srcRate || target };
   const inCh = channels[0];
-  const n = Math.floor(inCh.length / step);
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const a = Math.floor(i * step), b = Math.min(inCh.length, Math.floor((i + 1) * step));
-    let sum = 0, cnt = 0;
-    for (let j = a; j < b; j++) { sum += inCh[j]; cnt++; }
-    out[i] = cnt ? sum / cnt : 0;
+  let out;
+  try {
+    out = hqResample(inCh, srcRate, target);
+  } catch (err) {
+    // 万一失敗したら、前の簡単な方法で（録音を失わないことが最優先）
+    const step = srcRate / target;
+    const n = Math.floor(inCh.length / step);
+    out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * step), b = Math.min(inCh.length, Math.floor((i + 1) * step));
+      let sum = 0, cnt = 0;
+      for (let j = a; j < b; j++) { sum += inCh[j]; cnt++; }
+      out[i] = cnt ? sum / cnt : 0;
+    }
   }
   return { channels: [out], rate: target };
 }
@@ -2177,7 +2265,7 @@ function repairZeroGaps(channels, rate) {
   return { channels: out, fixed: fixed };
 }
 
-function finalizeWav() {
+async function finalizeWav() {
   const chunks = state.wavChunks.concat(state.rescueChunks);
   state.wavChunks = []; state.rescueChunks = []; state.rescueSamples = 0;
   let channels = concatWavChunks(chunks);
@@ -2201,10 +2289,16 @@ function finalizeWav() {
 
   let buffer;
   let outRate = state.wavSampleRate;
+  let outFrames = 0;
   try {
-    const dec = decimateTo16k(channels, state.wavSampleRate);
+    let lastPct = -1;
+    const dec = await decimateTo24kAsync(channels, state.wavSampleRate, (f) => {
+      const pct = Math.floor(f * 100);
+      if (pct !== lastPct && pct % 5 === 0) { lastPct = pct; setHint('高音質で保存しています… ' + pct + '%'); }
+    });
     buffer = C.buildWavBuffer(dec.channels, dec.rate);
     outRate = dec.rate;
+    outFrames = (dec.channels[0] && dec.channels[0].length) || 0;
   } catch (err) {
     cleanupAudio();
     showBanner('WAV の変換に失敗しました: ' + ((err && err.message) || '不明なエラー'));
@@ -2214,8 +2308,9 @@ function finalizeWav() {
   }
 
   const blob = new Blob([buffer], { type: 'audio/wav' });
-  const frames = channels[0].length;
-  const duration = outRate ? frames / outRate : measured;
+  // 長さは「変換後のサンプル数 ÷ 変換後のレート」で出す（前は変換前の数で割っていて約2倍に表示されていた）
+  const frames = outFrames || channels[0].length;
+  const duration = (outRate && outFrames) ? frames / outRate : (state.wavSampleRate ? channels[0].length / state.wavSampleRate : measured);
   saveRecording(blob, duration, { mime: 'audio/wav', ext: 'wav', label: 'WAV' });
   if (gapFixed > 0) {
     setTimeout(function () {
