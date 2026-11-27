@@ -1524,7 +1524,7 @@ function micErrorMessage(err) {
     return 'マイクが見つかりませんでした。マイクが接続されているかご確認ください。';
   }
   if (name === 'NotReadableError') {
-    return 'マイクを他のアプリが使用中のため使えません。他のアプリを閉じてからお試しください。';
+    return 'マイクを別のタブ（ボーカル・チューナーなど）か他のアプリが使用中です。チューナーのタブを一度「再読み込み」するか閉じてから、もう一度お試しください。';
   }
   return 'マイクを開始できませんでした: ' + ((err && err.message) || '不明なエラー');
 }
@@ -1761,6 +1761,46 @@ function micBestIdx() {
 function micBestSet(i) { try { localStorage.setItem('micBestIdx', String(i)); } catch (e) { /* 無視 */ } }
 function micBestClear() { try { localStorage.removeItem('micBestIdx'); } catch (e) { /* 無視 */ } }
 
+// ---- 同じサイトの別タブ（ボーカル・チューナーなど）とマイクを自動で譲り合う仕組み ----
+// Android はマイクを1つのタブしか使えないため、録音を始めるときにチューナー側へ「マイクを空けて」とお願いする。
+// 録音中は「録音中だよ」と知らせ続けて、チューナー側が録音のマイクを奪わないようにする（録音が最優先）。
+const VR_TAB_ID = 'recorder_' + Math.random().toString(36).slice(2, 8);
+const vrMicChan = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('ryuya_vocal_mic') : null;
+let vrBusyTimer = null;
+function vrPost(msg) {
+  if (!vrMicChan) return;
+  try { vrMicChan.postMessage(Object.assign({ from: VR_TAB_ID, owner: 'recorder' }, msg)); } catch (e) { /* 無視 */ }
+}
+function vrMicBusyStart() {
+  vrPost({ type: 'mic_busy' });
+  if (vrBusyTimer) clearInterval(vrBusyTimer);
+  vrBusyTimer = setInterval(() => {
+    if (state.stream && (state.status === 'recording' || state.status === 'paused' || state.status === 'stopping')) vrPost({ type: 'mic_busy' });
+  }, 3000);
+}
+function vrMicBusyEnd() {
+  if (vrBusyTimer) { clearInterval(vrBusyTimer); vrBusyTimer = null; }
+  vrPost({ type: 'mic_free' });
+}
+if (vrMicChan) {
+  vrMicChan.onmessage = (ev) => {
+    const d = ev && ev.data;
+    if (d && d.type === 'request_mic' && d.from !== VR_TAB_ID && state.stream) vrPost({ type: 'mic_busy' });
+  };
+}
+async function gumWithHandoff(c) {
+  try {
+    return await navigator.mediaDevices.getUserMedia(c);
+  } catch (e1) {
+    const n = e1 && e1.name;
+    if (!vrMicChan || n === 'NotAllowedError' || n === 'SecurityError' || n === 'NotFoundError' || n === 'OverconstrainedError') throw e1;
+    // 別タブ（チューナー）がマイクを持っている → 空けてもらってからもう一度
+    vrPost({ type: 'request_mic' });
+    await new Promise((r) => setTimeout(r, 300));
+    return await navigator.mediaDevices.getUserMedia(c);
+  }
+}
+
 async function openWorkingMic() {
   const dev = micSavedId();
   const base = dev ? { deviceId: { exact: dev } } : {};
@@ -1776,7 +1816,7 @@ async function openWorkingMic() {
   const best = micBestIdx();
   if (best >= 0 && best < cands.length) {
     try {
-      const st = await navigator.mediaDevices.getUserMedia(cands[best]);
+      const st = await gumWithHandoff(cands[best]);
       const tracks = st.getAudioTracks();
       // 音量では判定しない（歌う前は静かなのが当たり前。前はここで毎回はじいて、
       // 結局4通り全部やり直していた）。本当に無音のときだけ探し直す。
@@ -1790,7 +1830,7 @@ async function openWorkingMic() {
   }
   for (const c of cands) {
     let st = null;
-    try { st = await navigator.mediaDevices.getUserMedia(c); } catch (e) { lastErr = e; continue; }
+    try { st = await gumWithHandoff(c); } catch (e) { lastErr = e; continue; }
     const p = await probeStream(st);
     results.push({ name: c.name, stream: st, rms: p.rms, hiRel: p.hiRel });
   }
@@ -1981,6 +2021,7 @@ async function startRecording() {
   }
 
   state.status = 'recording';
+  vrMicBusyStart();
   state.startedAt = Date.now();
   state.pausedTotal = 0;
   state.pauseStartedAt = 0;
@@ -2333,6 +2374,7 @@ function cleanupAudio() {
   if (state.stream) {
     state.stream.getTracks().forEach((t) => t.stop());
     state.stream = null;
+    vrMicBusyEnd();
   }
   if (state.audioContext) {
     const ctx = state.audioContext;
